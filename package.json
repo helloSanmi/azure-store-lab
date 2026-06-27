@@ -1,0 +1,22 @@
+{
+  "name": "azure-storage-demo",
+  "version": "1.0.0",
+  "description": "A simple teaching demo for Azure Table Storage, Blob Storage, and Azure Files using Node.js and Express.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@azure/data-tables": "^13.3.0",
+    "@azure/storage-blob": "^12.27.0",
+    "@azure/storage-file-share": "^12.27.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-session": "^1.19.0",
+    "multer": "^2.2.0"
+  }
+}
