@@ -4,7 +4,7 @@ const express = require("express");
 const router = express.Router();
 
 const { findUserByEmail, createUser } = require("../src/store");
-const { currentUser, setFlash, takeFlash } = require("../src/auth");
+const { currentUser, requireStorage, setFlash, takeFlash } = require("../src/auth");
 const { renderLogin, renderSignup } = require("../src/views");
 
 // Sign a user in: rotate the session id first (prevents session fixation; the
@@ -28,7 +28,7 @@ router.get("/login", (req, res) => {
   res.send(renderLogin(takeFlash(req)));
 });
 
-router.post("/login", async (req, res, next) => {
+router.post("/login", requireStorage, async (req, res, next) => {
   try {
     const email = (req.body.email || "").trim().toLowerCase();
     if (!email) {
@@ -54,7 +54,7 @@ router.get("/signup", (req, res) => {
   res.send(renderSignup(takeFlash(req)));
 });
 
-router.post("/signup", async (req, res, next) => {
+router.post("/signup", requireStorage, async (req, res, next) => {
   try {
     const name = (req.body.name || "").trim();
     const email = (req.body.email || "").trim().toLowerCase();

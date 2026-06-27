@@ -11,7 +11,7 @@ const { BlobSASPermissions } = require("@azure/storage-blob");
 const { FileSASPermissions } = require("@azure/storage-file-share");
 const { blobServiceClient, shareServiceClient, SHARED_FILE_SHARE } = require("../src/azureClients");
 const { listUsers } = require("../src/store");
-const { currentUser, requireAuth, setFlash, takeFlash } = require("../src/auth");
+const { currentUser, requireAuth, requireStorage, setFlash, takeFlash } = require("../src/auth");
 const { renderDashboard, renderFiles, renderShared, renderMembers, renderShareLink, renderRename } = require("../src/views");
 const {
   MAX_FILE_BYTES,
@@ -49,8 +49,9 @@ function handleUpload(redirectTo) {
   };
 }
 
-// Everything below requires authentication.
+// Everything below requires authentication and configured storage.
 router.use(requireAuth);
+router.use(requireStorage);
 
 const IMAGE_TYPES = /^image\//;
 function fileExt(name) {

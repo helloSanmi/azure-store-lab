@@ -10,23 +10,23 @@ const path = require("path");
 // Load .env from the project root regardless of where `node` is launched from.
 require("dotenv").config({ path: path.join(__dirname, ".env") });
 
-// Fail fast with a friendly message (not a stack trace) if config is missing or
-// doesn't look like a real connection string (e.g. just the access key pasted in).
+// Warn (but DON'T crash) if the connection string is missing or doesn't look
+// like a real one. The app still starts and serves pages; storage features stay
+// disabled until a valid connection string is set and the app is restarted.
+// This keeps a fresh deploy (and its health checks) alive before config is set.
 const CONN = process.env.AZURE_STORAGE_CONNECTION_STRING;
 const looksLikeConnString =
   !!CONN &&
   (/(^|;)\s*(AccountKey|SharedAccessSignature)=/.test(CONN) || /UseDevelopmentStorage=true/i.test(CONN));
 if (!looksLikeConnString) {
-  console.error(
+  console.warn(
     "\n[config] AZURE_STORAGE_CONNECTION_STRING is " +
       (CONN ? "set but doesn't look like a connection string (it may be just the access key)." : "not set.") +
-      "\n  1. Copy .env.example to .env in the project root.\n" +
-      "  2. In the Azure Portal: Storage account -> Access keys -> copy the\n" +
-      "     *Connection string* field (NOT the shorter Key field).\n" +
-      "  3. It should start with 'DefaultEndpointsProtocol=' and include\n" +
-      "     'AccountKey=' and 'EndpointSuffix='.\n"
+      "\n  The app will start, but storage features are disabled until you set a valid\n" +
+      "  connection string (Storage account -> Access keys -> Connection string) and\n" +
+      "  restart. It should start with 'DefaultEndpointsProtocol=' and include\n" +
+      "  'AccountKey=' and 'EndpointSuffix='.\n"
   );
-  process.exit(1);
 }
 
 const crypto = require("crypto");

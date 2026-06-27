@@ -816,6 +816,22 @@ function renderRename({ user, name, action, hidden, backHref, active }) {
   return appShell({ title: "Rename file", active, user, flash: null, body });
 }
 
+// ---------- Storage-not-configured page ----------
+
+function renderNotConfigured() {
+  const html = `
+  <main class="auth-wrap">
+    <div class="auth-card">
+      <div class="brand"><span class="logo">${brandMark()}</span>${esc(APP_NAME)}</div>
+      <h1>Almost there</h1>
+      <p class="sub">Storage isn't set up yet, so files and accounts are paused.</p>
+      <div class="flash error" style="margin-top:4px;">Set <code>AZURE_STORAGE_CONNECTION_STRING</code> (App Service &rsaquo; Configuration, or your <code>.env</code>) and restart the app.</div>
+      <p class="auth-switch">The app itself is running; this page confirms it's reachable.</p>
+    </div>
+  </main>`;
+  return htmlDoc("Setup needed", html);
+}
+
 // ---------- Error page ----------
 
 function renderError(message) {
@@ -842,5 +858,6 @@ module.exports = {
   renderMembers,
   renderShareLink,
   renderRename,
+  renderNotConfigured,
   renderError,
 };

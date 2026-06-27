@@ -55,6 +55,12 @@ Test it works on the default URL: `https://$APP.azurewebsites.net`.
 (`package.json` already has `"start": "node server.js"`, so no startup command
 is needed.)
 
+> The app **boots even before the connection string is set** — it serves
+> `/login` (so the gateway health probe passes) and shows a "setup needed" page
+> for storage actions until you set `AZURE_STORAGE_CONNECTION_STRING` and
+> restart. So deploy order doesn't matter, and a missing setting won't
+> crash-loop the site.
+
 ---
 
 ## Part 2 — Application Gateway in front
