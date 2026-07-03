@@ -1,10 +1,10 @@
-// Auth routes: passwordless sign in / sign up backed by Azure Table Storage.
+// Auth routes: passwordless sign in / sign up backed by Azure SQL.
 
 const express = require("express");
 const router = express.Router();
 
 const { findUserByEmail, createUser } = require("../src/store");
-const { currentUser, requireStorage, setFlash, takeFlash } = require("../src/auth");
+const { currentUser, requireDb, setFlash, takeFlash } = require("../src/auth");
 const { renderLogin, renderSignup } = require("../src/views");
 
 // Sign a user in: rotate the session id first (prevents session fixation; the
@@ -12,7 +12,7 @@ const { renderLogin, renderSignup } = require("../src/views");
 function startSession(req, user, flashText, callback) {
   req.session.regenerate((err) => {
     if (err) return callback(err);
-    req.session.user = { rowKey: user.rowKey, name: user.name, email: user.email };
+    req.session.user = { id: user.id, name: user.name, email: user.email };
     req.session.flash = { type: "success", text: flashText };
     req.session.save(callback);
   });
@@ -28,7 +28,7 @@ router.get("/login", (req, res) => {
   res.send(renderLogin(takeFlash(req)));
 });
 
-router.post("/login", requireStorage, async (req, res, next) => {
+router.post("/login", requireDb, async (req, res, next) => {
   try {
     const email = (req.body.email || "").trim().toLowerCase();
     if (!email) {
@@ -54,7 +54,7 @@ router.get("/signup", (req, res) => {
   res.send(renderSignup(takeFlash(req)));
 });
 
-router.post("/signup", requireStorage, async (req, res, next) => {
+router.post("/signup", requireDb, async (req, res, next) => {
   try {
     const name = (req.body.name || "").trim();
     const email = (req.body.email || "").trim().toLowerCase();

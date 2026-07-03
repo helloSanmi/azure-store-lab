@@ -1,7 +1,8 @@
 // Tiny session helpers. "Passwordless" auth: the session simply remembers which
 // account is signed in. The session itself is signed cookie-backed (express-session).
 
-const { configured } = require("./azureClients");
+const { configured: storageConfigured } = require("./azureClients");
+const { configured: dbConfigured } = require("./db");
 const { renderNotConfigured } = require("./views");
 
 // The signed-in account, or null.
@@ -9,11 +10,17 @@ function currentUser(req) {
   return req.session && req.session.user ? req.session.user : null;
 }
 
-// Gate for routes that actually touch Azure Storage. When the connection string
-// isn't set, show a friendly "setup needed" page instead of crashing on a null
-// client. (Routes that render without storage, like GET /login, skip this.)
+// Gate for routes that touch Azure Storage (Blob / Files). When the storage
+// connection string isn't set, show a friendly "setup needed" page instead of
+// crashing on a null client. (Routes that render without storage skip this.)
 function requireStorage(req, res, next) {
-  if (configured) return next();
+  if (storageConfigured) return next();
+  return res.status(503).send(renderNotConfigured());
+}
+
+// Gate for routes that touch the SQL database (accounts, file metadata).
+function requireDb(req, res, next) {
+  if (dbConfigured) return next();
   return res.status(503).send(renderNotConfigured());
 }
 
@@ -36,4 +43,4 @@ function takeFlash(req) {
   return flash;
 }
 
-module.exports = { currentUser, requireAuth, requireStorage, setFlash, takeFlash };
+module.exports = { currentUser, requireAuth, requireStorage, requireDb, setFlash, takeFlash };

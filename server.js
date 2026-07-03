@@ -1,7 +1,7 @@
-// Azure Storage demo: a small authenticated app over three Azure Storage services:
-//   Table Storage -> user accounts + members list
-//   Blob Storage  -> each user's private files
-//   Azure Files   -> one shared file area
+// Azure Store Lab: a small authenticated app spanning a database and storage:
+//   Azure SQL    -> user accounts + file metadata (the queryable "truth")
+//   Blob Storage -> each user's private file bytes (keyed by the file's id)
+//   Azure Files  -> one shared file area (folders + bytes)
 //
 // Passwordless sign in / sign up; sessions via express-session. See README.md.
 
@@ -29,9 +29,18 @@ if (!looksLikeConnString) {
   );
 }
 
+// Same idea for the database: warn but don't crash if it isn't configured yet.
+if (!process.env.AZURE_SQL_CONNECTION_STRING) {
+  console.warn(
+    "[config] AZURE_SQL_CONNECTION_STRING is not set. The app will start, but " +
+      "accounts and My Files are disabled until you set it and restart."
+  );
+}
+
 const crypto = require("crypto");
 const express = require("express");
 const session = require("express-session");
+const db = require("./src/db");
 const { renderError } = require("./src/views");
 
 const app = express();
@@ -74,6 +83,18 @@ app.use((err, req, res, next) => {
   res.status(500).send(renderError(err.message));
 });
 
-app.listen(PORT, () => {
-  console.log(`Azure Storage demo running at http://localhost:${PORT}`);
-});
+// Create the DB tables if needed, then start listening. Schema failure is
+// non-fatal: the app still boots so it can serve the "setup needed" page.
+(async () => {
+  if (db.configured) {
+    try {
+      await db.ensureSchema();
+      console.log("[db] schema ready");
+    } catch (err) {
+      console.error("[db] could not initialise schema:", err.message);
+    }
+  }
+  app.listen(PORT, () => {
+    console.log(`Azure Store Lab running at http://localhost:${PORT}`);
+  });
+})();

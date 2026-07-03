@@ -217,8 +217,7 @@ const CONFIRM_DELETE_SCRIPT = `
   var pending = null, lastFocus = null;
   function open(form){
     pending = form;
-    var input = form.elements && form.elements.name;
-    var nm = input ? input.value : "this item";
+    var nm = form.getAttribute("data-confirm-label") || "this item";
     text.textContent = "Delete \\"" + nm + "\\"? This can\\u2019t be undone.";
     modal.hidden = false; lastFocus = document.activeElement; if(cancelBtn) cancelBtn.focus();
   }
@@ -362,6 +361,34 @@ function explainer(calls) {
   return `<details class="explainer">
     <summary>${icon("cloud")} Behind the scenes: the Azure SDK calls this page uses</summary>
     <ul>${items}</ul>
+  </details>`;
+}
+
+// Teaching panel: why accounts live in a relational database, not NoSQL storage.
+function nosqlVsSqlPanel() {
+  return `<details class="explainer">
+    <summary>${icon("cloud")} NoSQL vs SQL: why accounts live in a database</summary>
+    <div class="compare">
+      <div>
+        <h4>Azure Table Storage (NoSQL)</h4>
+        <ul>
+          <li>Key-value: PartitionKey + RowKey</li>
+          <li>Schema-less; no relationships or JOINs</li>
+          <li>Very cheap, huge scale, simple lookups</li>
+          <li>Great for logs, events, telemetry</li>
+        </ul>
+      </div>
+      <div>
+        <h4>Azure SQL (relational)</h4>
+        <ul>
+          <li>Tables with a fixed schema, types, constraints</li>
+          <li>Primary &amp; foreign keys, JOINs, transactions</li>
+          <li>Rich queries: WHERE, ORDER BY, COUNT, SUM</li>
+          <li>Great when data is related and queried many ways</li>
+        </ul>
+      </div>
+    </div>
+    <p class="compare-note">This app uses SQL because a user <strong>has many</strong> files (a relationship) and we constantly search, sort, and count them. That's exactly what a relational database is for.</p>
   </details>`;
 }
 
@@ -566,9 +593,9 @@ function renderDashboard({ user, myFiles, shared, members, storage, breakdown: b
       ${quickLink("/members", "members", "Members", "Everyone who has signed up (Azure Table Storage).")}
     </div>
     ${explainer([
-      { op: "Your file count", call: "containerClient.listBlobsFlat()" },
-      { op: "Shared file count", call: "share.rootDirectoryClient.listFilesAndDirectories()" },
-      { op: "Member count", call: "tableClient.listEntities()" },
+      { op: "Your files + storage", call: "SELECT COUNT(*), SUM(size_bytes) FROM files WHERE owner_id = @you" },
+      { op: "Shared file count", call: "share.rootDirectoryClient.listFilesAndDirectories()  (Azure Files)" },
+      { op: "Member count", call: "SELECT COUNT(*) FROM users" },
     ])}`;
   return appShell({ title: "Dashboard", active: "dashboard", user, flash, body });
 }
@@ -588,14 +615,12 @@ function iconBtn(href, iconName, label) {
   return `<a class="action" href="${href}" title="${esc(label)}" aria-label="${esc(label)}">${icon(iconName)}</a>`;
 }
 
-function deleteForm(action, name, extraFields) {
-  // No inline onsubmit handler: the filename is never interpolated into JS.
-  // A delegated submit listener (CONFIRM_DELETE_SCRIPT) reads the name from the
-  // hidden input (safe attribute-escaped value) and confirms.
-  return `<form method="post" action="${action}" class="action-form">
-    <input type="hidden" name="name" value="${esc(name)}">
-    ${extraFields || ""}
-    <button class="action danger" type="submit" title="Delete" aria-label="Delete ${esc(name)}">${icon("trash")}</button>
+function deleteForm(action, label, fields) {
+  // Intercepted by CONFIRM_DELETE_SCRIPT, which reads the human label from
+  // data-confirm-label. `fields` supplies the hidden inputs (id, or name+path).
+  return `<form method="post" action="${action}" class="action-form" data-confirm-label="${esc(label)}">
+    ${fields || ""}
+    <button class="action danger" type="submit" title="Delete" aria-label="Delete ${esc(label)}">${icon("trash")}</button>
   </form>`;
 }
 
@@ -616,18 +641,20 @@ function fileTile(file) {
         ${iconBtn(file.url, "download", "Download")}
         ${iconBtn(file.shareUrl, "link", "Get a shareable link")}
         ${iconBtn(file.renameUrl, "edit", "Rename")}
-        ${deleteForm("/files/delete", file.name)}
+        ${deleteForm("/files/delete", file.name, `<input type="hidden" name="id" value="${esc(file.id)}">`)}
       </div>
     </div>
   </div>`;
 }
 
 const FILES_CALLS = [
-  { op: "Open your container", call: "blobServiceClient.getContainerClient(yourId).createIfNotExists()" },
-  { op: "List your files", call: "containerClient.listBlobsFlat()" },
-  { op: "Upload", call: "blockBlobClient.uploadData(buffer, { blobHTTPHeaders })" },
-  { op: "Preview / download", call: "blobClient.download()" },
-  { op: "Delete", call: "blockBlobClient.deleteIfExists()" },
+  { op: "List your files", call: "SELECT * FROM files WHERE owner_id = @you ORDER BY uploaded_at DESC" },
+  { op: "Search / sort", call: "... WHERE display_name LIKE @q   ORDER BY size_bytes DESC" },
+  { op: "Upload", call: "INSERT INTO files (...)   +   blockBlobClient.uploadData(bytes)" },
+  { op: "Preview / download", call: "SELECT ... WHERE id = @id   +   blobClient.download()" },
+  { op: "Rename", call: "UPDATE files SET display_name = @new   (the bytes never move)" },
+  { op: "Delete", call: "DELETE FROM files ...   +   blockBlobClient.deleteIfExists()" },
+  { op: "Usage / quota", call: "SELECT COUNT(*), SUM(size_bytes) FROM files WHERE owner_id = @you" },
   { op: "Shareable link", call: 'blobClient.generateSasUrl({ permissions: "r", expiresOn })' },
 ];
 
@@ -675,7 +702,7 @@ function renderShared({ user, path, folders, files, flash }) {
         <td><a class="folder-link" href="/shared?path=${encodeURIComponent(child)}">${icon("folder")}${esc(name)}</a></td>
         <td class="muted"></td>
         <td class="muted">Folder</td>
-        <td><div class="row-actions">${deleteForm("/shared/folder/delete", name, pathField)}</div></td>
+        <td><div class="row-actions">${deleteForm("/shared/folder/delete", name, `<input type="hidden" name="name" value="${esc(name)}">${pathField}`)}</div></td>
       </tr>`;
     })
     .join("");
@@ -690,7 +717,7 @@ function renderShared({ user, path, folders, files, flash }) {
           ${iconBtn(f.url, "download", "Download")}
           ${iconBtn(f.shareUrl, "link", "Get a shareable link")}
           ${iconBtn(f.renameUrl, "edit", "Rename")}
-          ${deleteForm("/shared/delete", f.name, pathField)}
+          ${deleteForm("/shared/delete", f.name, `<input type="hidden" name="name" value="${esc(f.name)}">${pathField}`)}
         </div></td>
       </tr>`
     )
@@ -731,7 +758,7 @@ function renderMembers({ user, members, flash }) {
   const rows = members
     .map(
       (m) => `<tr>
-        <td><div style="display:flex;align-items:center;gap:10px;"><span class="avatar">${esc(initials(m.name))}</span>${esc(m.name)}${m.rowKey === user.rowKey ? ' <span class="muted">(you)</span>' : ""}</div></td>
+        <td><div style="display:flex;align-items:center;gap:10px;"><span class="avatar">${esc(initials(m.name))}</span>${esc(m.name)}${m.id === user.id ? ' <span class="muted">(you)</span>' : ""}</div></td>
         <td>${esc(m.email)}</td>
         <td class="muted">${esc(formatDate(m.createdAt))}</td>
       </tr>`
@@ -742,13 +769,14 @@ function renderMembers({ user, members, flash }) {
     : emptyState("No members yet.");
 
   const body = `
-    ${pageHeader("Members", "Everyone who has signed up. Each is one entity in the users table.", "Azure Table Storage · table “users”")}
+    ${pageHeader("Members", "Everyone who has signed up. Each is one row in the users table.", "Azure SQL · table “users”")}
     ${table}
     ${explainer([
-      { op: "List all members", call: "tableClient.listEntities()" },
-      { op: "Find by email (sign in)", call: "listEntities({ queryOptions: { filter: odata`email eq ...` } })" },
-      { op: "Create member (sign up)", call: "tableClient.createEntity({ partitionKey, rowKey, ... })" },
-    ])}`;
+      { op: "List all members", call: "SELECT * FROM users ORDER BY created_at DESC" },
+      { op: "Find by email (sign in)", call: "SELECT TOP 1 * FROM users WHERE email = @email" },
+      { op: "Create member (sign up)", call: "INSERT INTO users (id, name, email) VALUES (...)" },
+    ])}
+    ${nosqlVsSqlPanel()}`;
   return appShell({ title: "Members", active: "members", user, flash, body });
 }
 
@@ -824,8 +852,8 @@ function renderNotConfigured() {
     <div class="auth-card">
       <div class="brand"><span class="logo">${brandMark()}</span>${esc(APP_NAME)}</div>
       <h1>Almost there</h1>
-      <p class="sub">Storage isn't set up yet, so files and accounts are paused.</p>
-      <div class="flash error" style="margin-top:4px;">Set <code>AZURE_STORAGE_CONNECTION_STRING</code> (App Service &rsaquo; Configuration, or your <code>.env</code>) and restart the app.</div>
+      <p class="sub">The backend isn't fully set up yet, so files and accounts are paused.</p>
+      <div class="flash error" style="margin-top:4px;">Set <code>AZURE_SQL_CONNECTION_STRING</code> (the database) and <code>AZURE_STORAGE_CONNECTION_STRING</code> (blob &amp; files), then restart the app.</div>
       <p class="auth-switch">The app itself is running; this page confirms it's reachable.</p>
     </div>
   </main>`;

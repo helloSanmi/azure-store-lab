@@ -1,5 +1,5 @@
-// Authenticated app routes: Dashboard, My Files (Blob), Shared Files (Azure
-// Files), and Members (Table). Every route here requires a signed-in user.
+// Authenticated app routes: Dashboard, My Files (SQL metadata + Blob bytes),
+// Shared Files (Azure Files), and Members (SQL). Requires a signed-in user.
 
 const express = require("express");
 const multer = require("multer");
@@ -10,8 +10,8 @@ const router = express.Router();
 const { BlobSASPermissions } = require("@azure/storage-blob");
 const { FileSASPermissions } = require("@azure/storage-file-share");
 const { blobServiceClient, shareServiceClient, SHARED_FILE_SHARE } = require("../src/azureClients");
-const { listUsers } = require("../src/store");
-const { currentUser, requireAuth, requireStorage, setFlash, takeFlash } = require("../src/auth");
+const store = require("../src/store");
+const { currentUser, requireAuth, requireStorage, requireDb, setFlash, takeFlash } = require("../src/auth");
 const { renderDashboard, renderFiles, renderShared, renderMembers, renderShareLink, renderRename } = require("../src/views");
 const {
   MAX_FILE_BYTES,
@@ -22,6 +22,7 @@ const {
   MAX_BYTES_SHARED,
   checkExtension,
   checkQuota,
+  quotaFromCounts,
   usage,
   breakdown,
 } = require("../src/uploads");
@@ -49,15 +50,10 @@ function handleUpload(redirectTo) {
   };
 }
 
-// Everything below requires authentication and configured storage.
+// Everything below requires authentication, the database, and storage.
 router.use(requireAuth);
+router.use(requireDb);
 router.use(requireStorage);
-
-const IMAGE_TYPES = /^image\//;
-function fileExt(name) {
-  const i = name.lastIndexOf(".");
-  return i >= 0 ? name.slice(i + 1) : "";
-}
 
 // Reduce an uploaded filename to a safe, flat leaf name: strip any directory
 // part, replace characters that Azure Blob/Files reject, and cap the length.
@@ -108,31 +104,23 @@ function sharedDir(p) {
   return p ? share.getDirectoryClient(p) : share.rootDirectoryClient;
 }
 
-// A user's blob container is named after their row key (a lowercase UUID, which
-// is a valid container name).
-function userContainer(rowKey) {
-  return blobServiceClient.getContainerClient(rowKey);
+// A user's blob container is named after their account id (a lowercase UUID,
+// a valid container name). Inside it, each blob is named by the file's id from
+// the database, so the DB row is the single source of truth about each file.
+function userContainer(userId) {
+  return blobServiceClient.getContainerClient(userId);
 }
 
-async function listUserFiles(rowKey) {
-  const container = userContainer(rowKey);
-  await container.createIfNotExists();
-  const files = [];
-  for await (const blob of container.listBlobsFlat()) {
-    const contentType = (blob.properties && blob.properties.contentType) || "";
-    files.push({
-      name: blob.name,
-      url: `/files/blob/${encodeURIComponent(blob.name)}`,
-      shareUrl: `/files/share/${encodeURIComponent(blob.name)}`,
-      renameUrl: `/files/rename/${encodeURIComponent(blob.name)}`,
-      isImage: IMAGE_TYPES.test(contentType),
-      ext: fileExt(blob.name),
-      contentType,
-      size: blob.properties && blob.properties.contentLength,
-      lastModified: blob.properties && blob.properties.lastModified,
-    });
-  }
-  return files;
+// GUID check for :id route params: a bad value gives a clean 400 rather than a
+// SQL conversion error.
+function isGuid(v) {
+  return typeof v === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+}
+
+// So a shared (SAS) link downloads with the friendly name, even though the blob
+// is named by an opaque id.
+function contentDisposition(displayName) {
+  return `attachment; filename="${String(displayName).replace(/["\r\n]/g, "")}"`;
 }
 
 // List one folder of the shared share: its subfolders (names) and files
@@ -171,13 +159,13 @@ router.get("/dashboard", async (req, res, next) => {
     // than failing the whole page.
     let myFiles = "n/a", shared = "n/a", members = "n/a", storage = null, bd = null;
     try {
-      const f = await listUserFiles(user.rowKey);
+      const f = await store.listUserFiles(user.id);
       myFiles = f.length;
       storage = usage(f, MAX_FILES_PER_USER, MAX_BYTES_PER_USER);
       bd = breakdown(f);
     } catch (e) { /* keep "n/a" */ }
     try { shared = (await listSharedDir("")).files.length; } catch (e) { /* keep "n/a" */ }
-    try { members = (await listUsers()).length; } catch (e) { /* keep "n/a" */ }
+    try { members = (await store.listUsers()).length; } catch (e) { /* keep "n/a" */ }
     res.send(renderDashboard({ user, myFiles, shared, members, storage, breakdown: bd, flash: takeFlash(req) }));
   } catch (err) {
     next(err);
@@ -188,7 +176,7 @@ router.get("/dashboard", async (req, res, next) => {
 router.get("/files", async (req, res, next) => {
   try {
     const user = currentUser(req);
-    const files = await listUserFiles(user.rowKey);
+    const files = await store.listUserFiles(user.id);
     res.send(renderFiles({ user, files, flash: takeFlash(req) }));
   } catch (err) {
     next(err);
@@ -209,17 +197,34 @@ router.post("/files/upload", handleUpload("/files"), async (req, res, next) => {
       setFlash(req, "error", extError);
       return res.redirect("/files");
     }
-    const existing = await listUserFiles(user.rowKey);
-    const quotaError = checkQuota(existing, name, req.file.size, MAX_FILES_PER_USER, MAX_BYTES_PER_USER);
+    if (await store.fileNameExists(user.id, name)) {
+      setFlash(req, "error", `A file named “${name}” already exists. Rename or delete it first.`);
+      return res.redirect("/files");
+    }
+    const { count, bytes } = await store.userUsage(user.id);
+    const quotaError = quotaFromCounts(count, bytes, req.file.size, MAX_FILES_PER_USER, MAX_BYTES_PER_USER);
     if (quotaError) {
       setFlash(req, "error", quotaError);
       return res.redirect("/files");
     }
-    const container = userContainer(user.rowKey);
-    await container.createIfNotExists();
-    await container.getBlockBlobClient(name).uploadData(req.file.buffer, {
-      blobHTTPHeaders: { blobContentType: req.file.mimetype },
+    // Metadata first (this gives us the id that names the blob), then the bytes.
+    const fileId = await store.createFileRecord({
+      ownerId: user.id,
+      displayName: name,
+      contentType: req.file.mimetype,
+      sizeBytes: req.file.size,
     });
+    try {
+      const container = userContainer(user.id);
+      await container.createIfNotExists();
+      await container.getBlockBlobClient(fileId).uploadData(req.file.buffer, {
+        blobHTTPHeaders: { blobContentType: req.file.mimetype, blobContentDisposition: contentDisposition(name) },
+      });
+    } catch (e) {
+      // Blob upload failed: don't leave an orphan metadata row.
+      await store.deleteFileRecord(user.id, fileId).catch(() => {});
+      throw e;
+    }
     res.redirect("/files");
   } catch (err) {
     next(err);
@@ -228,14 +233,17 @@ router.post("/files/upload", handleUpload("/files"), async (req, res, next) => {
 
 // Stream a blob from the signed-in user's own container (private containers, so
 // we proxy the bytes). Used for inline image previews and downloads.
-router.get("/files/blob/:name", async (req, res, next) => {
+router.get("/files/blob/:id", async (req, res, next) => {
   try {
     const user = currentUser(req);
-    if (!isValidLeaf(req.params.name)) return res.status(400).send("Invalid file name");
-    const blob = userContainer(user.rowKey).getBlobClient(req.params.name);
+    if (!isGuid(req.params.id)) return res.status(400).send("Invalid file id");
+    // The DB row proves the file belongs to this user (owner_id = me).
+    const file = await store.getFile(user.id, req.params.id);
+    if (!file) return res.status(404).send("Not found");
+    const blob = userContainer(user.id).getBlobClient(file.id);
     if (!(await blob.exists())) return res.status(404).send("Not found");
     const download = await blob.download();
-    if (download.contentType) res.set("Content-Type", download.contentType);
+    res.set("Content-Type", file.contentType || download.contentType || "application/octet-stream");
     res.set("X-Content-Type-Options", "nosniff");
     const body = download.readableStreamBody;
     if (!body) return res.status(204).end();
@@ -249,17 +257,23 @@ router.get("/files/blob/:name", async (req, res, next) => {
   }
 });
 
-// Delete one of the signed-in user's own blobs.
+// Delete one of the signed-in user's files: remove the bytes, then the row.
 router.post("/files/delete", async (req, res, next) => {
   try {
     const user = currentUser(req);
-    const name = req.body.name;
-    if (!isValidLeaf(name)) {
-      setFlash(req, "error", "Invalid file name.");
+    const id = req.body.id;
+    if (!isGuid(id)) {
+      setFlash(req, "error", "Invalid file id.");
       return res.redirect("/files");
     }
-    await userContainer(user.rowKey).getBlockBlobClient(name).deleteIfExists();
-    setFlash(req, "success", `Deleted “${name}”.`);
+    const file = await store.getFile(user.id, id);
+    if (!file) {
+      setFlash(req, "error", "That file no longer exists.");
+      return res.redirect("/files");
+    }
+    await userContainer(user.id).getBlockBlobClient(id).deleteIfExists();
+    await store.deleteFileRecord(user.id, id);
+    setFlash(req, "success", `Deleted “${file.name}”.`);
     res.redirect("/files");
   } catch (err) {
     next(err);
@@ -267,28 +281,33 @@ router.post("/files/delete", async (req, res, next) => {
 });
 
 // Generate a time-limited, read-only shareable link (SAS URL) for one of the
-// user's own blobs. The link works without signing in, until it expires.
-router.get("/files/share/:name", async (req, res, next) => {
+// user's own files. The link works without signing in, until it expires.
+router.get("/files/share/:id", async (req, res, next) => {
   try {
     const user = currentUser(req);
-    if (!isValidLeaf(req.params.name)) return res.status(400).send("Invalid file name");
-    const blob = userContainer(user.rowKey).getBlobClient(req.params.name);
+    if (!isGuid(req.params.id)) return res.status(400).send("Invalid file id");
+    const file = await store.getFile(user.id, req.params.id);
+    if (!file) return res.status(404).send("Not found");
+    const blob = userContainer(user.id).getBlobClient(file.id);
     if (!(await blob.exists())) return res.status(404).send("Not found");
     const expiresOn = new Date(Date.now() + SAS_TTL_MS);
     const url = await blob.generateSasUrl({ permissions: BlobSASPermissions.parse("r"), expiresOn });
-    res.send(renderShareLink({ user, name: req.params.name, url, expiresOn, backHref: "/files" }));
+    res.send(renderShareLink({ user, name: file.name, url, expiresOn, backHref: "/files" }));
   } catch (err) {
     next(err);
   }
 });
 
-// Rename a blob. Blobs can't be renamed in place, so we copy to the new name
-// and delete the old one.
-router.get("/files/rename/:name", async (req, res, next) => {
+// Rename a file. With a database + id-keyed blobs, this is just an UPDATE: 
+// the bytes never move. (We only refresh the blob's download filename so shared
+// links save under the new name; that's a metadata header, not a byte copy.)
+router.get("/files/rename/:id", async (req, res, next) => {
   try {
     const user = currentUser(req);
-    if (!isValidLeaf(req.params.name)) return res.status(400).send("Invalid file name");
-    res.send(renderRename({ user, name: req.params.name, action: "/files/rename", hidden: { oldName: req.params.name }, backHref: "/files", active: "files" }));
+    if (!isGuid(req.params.id)) return res.status(400).send("Invalid file id");
+    const file = await store.getFile(user.id, req.params.id);
+    if (!file) return res.status(404).send("Not found");
+    res.send(renderRename({ user, name: file.name, action: "/files/rename", hidden: { id: file.id }, backHref: "/files", active: "files" }));
   } catch (err) {
     next(err);
   }
@@ -297,9 +316,14 @@ router.get("/files/rename/:name", async (req, res, next) => {
 router.post("/files/rename", async (req, res, next) => {
   try {
     const user = currentUser(req);
-    const oldName = req.body.oldName;
-    if (!isValidLeaf(oldName)) {
-      setFlash(req, "error", "Invalid file name.");
+    const id = req.body.id;
+    if (!isGuid(id)) {
+      setFlash(req, "error", "Invalid file id.");
+      return res.redirect("/files");
+    }
+    const file = await store.getFile(user.id, id);
+    if (!file) {
+      setFlash(req, "error", "That file no longer exists.");
       return res.redirect("/files");
     }
     const newName = safeName(req.body.newName);
@@ -312,23 +336,19 @@ router.post("/files/rename", async (req, res, next) => {
       setFlash(req, "error", extError);
       return res.redirect("/files");
     }
-    if (newName === oldName) return res.redirect("/files");
-    const container = userContainer(user.rowKey);
-    const src = container.getBlobClient(oldName);
-    if (!(await src.exists())) {
-      setFlash(req, "error", "That file no longer exists.");
-      return res.redirect("/files");
-    }
-    if (await container.getBlobClient(newName).exists()) {
+    if (newName === file.name) return res.redirect("/files");
+    if (await store.fileNameExists(user.id, newName)) {
       setFlash(req, "error", `A file named “${newName}” already exists.`);
       return res.redirect("/files");
     }
-    const props = await src.getProperties();
-    const buffer = await src.downloadToBuffer();
-    await container.getBlockBlobClient(newName).uploadData(buffer, {
-      blobHTTPHeaders: { blobContentType: props.contentType || "application/octet-stream" },
-    });
-    await container.getBlockBlobClient(oldName).deleteIfExists();
+    await store.renameFile(user.id, id, newName);
+    // Best-effort: keep the blob's download filename in sync (no bytes moved).
+    try {
+      await userContainer(user.id).getBlockBlobClient(id).setHTTPHeaders({
+        blobContentType: file.contentType || "application/octet-stream",
+        blobContentDisposition: contentDisposition(newName),
+      });
+    } catch (e) { /* header refresh is best-effort */ }
     setFlash(req, "success", `Renamed to “${newName}”.`);
     res.redirect("/files");
   } catch (err) {
@@ -575,7 +595,7 @@ router.post("/shared/rename", async (req, res, next) => {
 router.get("/members", async (req, res, next) => {
   try {
     const user = currentUser(req);
-    const members = await listUsers();
+    const members = await store.listUsers();
     res.send(renderMembers({ user, members, flash: takeFlash(req) }));
   } catch (err) {
     next(err);

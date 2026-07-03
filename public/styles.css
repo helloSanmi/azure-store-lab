@@ -264,6 +264,14 @@ tr:last-child td { border-bottom: none; }
 .explainer .op { font-size: .8rem; color: var(--muted); }
 .explainer code { background: var(--surface-2); border: 1px solid var(--border); padding: 6px 10px; border-radius: 7px; font-size: .82rem; overflow-x: auto; white-space: pre; color: var(--text-soft); }
 
+/* NoSQL vs SQL comparison panel */
+.compare { display: grid; grid-template-columns: 1fr; gap: 18px; padding: 16px 20px; }
+@media (min-width: 640px) { .compare { grid-template-columns: 1fr 1fr; } }
+.compare h4 { margin: 0 0 8px; font-size: .95rem; }
+.compare ul { margin: 0; padding-left: 18px; display: grid; gap: 5px; }
+.compare li { font-size: .88rem; color: var(--text-soft); }
+.compare-note { padding: 2px 20px 16px; margin: 0; color: var(--text-soft); font-size: .9rem; }
+
 /* ---------- SAS link copy row ---------- */
 .copy-row { display: flex; gap: 8px; align-items: center; }
 .copy-row input { flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .82rem; }

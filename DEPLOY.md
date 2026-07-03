@@ -13,8 +13,6 @@ Internet ──► Application Gateway (public IP, TLS, optional WAF) ──► 
 
 ---
 
-## Part 1 — App Service (the web app)
-
 Set a few names first (use your own; the app name must be globally unique):
 
 ```bash
@@ -22,22 +20,40 @@ RG=store-lab-rg
 LOC=uksouth
 APP=store-lab-<your-unique-suffix>
 PLAN=store-lab-plan
+SQLSRV=store-lab-sql-<your-unique-suffix>
 ```
+
+## Part 1a: Azure SQL Database
+
+```bash
+az sql server create -g $RG -n $SQLSRV -l $LOC \
+  --admin-user sqladmin --admin-password '<a-strong-password>'
+az sql db create -g $RG -s $SQLSRV -n storelab --service-objective Basic
+# Allow other Azure services (incl. App Service) to reach the SQL server:
+az sql server firewall-rule create -g $RG -s $SQLSRV -n allow-azure \
+  --start-ip-address 0.0.0.0 --end-ip-address 0.0.0.0
+```
+
+Grab the ADO.NET connection string (SQL database → Connection strings → ADO.NET)
+and fill in the password, you'll set it as an app setting below. The app creates
+its tables (`schema.sql`) automatically on first start.
+
+## Part 1b: App Service (the web app)
 
 Create the plan + web app (Linux, Node 24):
 
 ```bash
-az group create -n $RG -l $LOC
 az appservice plan create -g $RG -n $PLAN --is-linux --sku B1
 az webapp create -g $RG -p $PLAN -n $APP --runtime "NODE:24-lts"
 ```
 
 Set the app's configuration (these become environment variables). **Set
-`SESSION_SECRET`** — without it the app generates a new random key on every
+`SESSION_SECRET`**, without it the app generates a new random key on every
 restart/instance, which logs everyone out:
 
 ```bash
 az webapp config appsettings set -g $RG -n $APP --settings \
+  AZURE_SQL_CONNECTION_STRING="Server=tcp:$SQLSRV.database.windows.net,1433;Database=storelab;User Id=sqladmin;Password=<a-strong-password>;Encrypt=true" \
   AZURE_STORAGE_CONNECTION_STRING="DefaultEndpointsProtocol=https;AccountName=...;AccountKey=...;EndpointSuffix=core.windows.net" \
   SESSION_SECRET="$(openssl rand -hex 32)"
 
@@ -55,7 +71,7 @@ Test it works on the default URL: `https://$APP.azurewebsites.net`.
 (`package.json` already has `"start": "node server.js"`, so no startup command
 is needed.)
 
-> The app **boots even before the connection string is set** — it serves
+> The app **boots even before the connection string is set**, it serves
 > `/login` (so the gateway health probe passes) and shows a "setup needed" page
 > for storage actions until you set `AZURE_STORAGE_CONNECTION_STRING` and
 > restart. So deploy order doesn't matter, and a missing setting won't
@@ -63,7 +79,7 @@ is needed.)
 
 ---
 
-## Part 2 — Application Gateway in front
+## Part 2: Application Gateway in front
 
 Easiest in the **Portal** → *Create a resource* → *Application Gateway*. The
 settings that matter:
@@ -73,11 +89,11 @@ settings that matter:
 2. **Frontend:** create a new public IP.
 3. **Backend pool:** target type **App Services** (or "IP address or FQDN") and
    enter the backend FQDN `'"$APP"'.azurewebsites.net`.
-4. **Backend setting (HTTP settings) — the important bit:**
+4. **Backend setting (HTTP settings), the important bit:**
    - Protocol **HTTPS**, port **443**
    - **"Use well known CA certificate" = Yes** (App Service has a trusted cert)
-   - **"Override with new host name" → "Pick host name from backend target" = Yes**
-     — App Service routes by the `Host` header, so the gateway must send
+   - **"Override with new host name" → "Pick host name from backend target" = Yes.**
+     App Service routes by the `Host` header, so the gateway must send
      `*.azurewebsites.net`, not the gateway's own name. *(If you skip this you
      get 404s from App Service.)*
    - **Custom probe:** path `/login` (returns `200`), and also tick "Pick host
@@ -102,7 +118,7 @@ az network application-gateway create -g $RG -n store-lab-agw --sku Standard_v2 
 
 ---
 
-## Part 3 — Lock down direct access
+## Part 3: Lock down direct access
 
 Otherwise anyone can bypass the gateway via `https://$APP.azurewebsites.net`.
 Restrict the App Service to the gateway only:
@@ -115,11 +131,11 @@ az webapp config access-restriction add -g $RG -n $APP \
 ```
 
 (For a stronger setup, give App Service a **Private Endpoint** and integrate the
-gateway's VNet instead — but the IP restriction above is enough to start.)
+gateway's VNet instead, but the IP restriction above is enough to start.)
 
 ---
 
-## Part 4 — Sessions (specific to this app)
+## Part 4: Sessions (specific to this app)
 
 This app keeps sessions **in memory**, so with a gateway in front:
 
@@ -135,6 +151,7 @@ This app keeps sessions **in memory**, so with a gateway in front:
 
 ## Checklist
 
+- [ ] Azure SQL database created; firewall allows Azure services; `AZURE_SQL_CONNECTION_STRING` set
 - [ ] `AZURE_STORAGE_CONNECTION_STRING` set as an App Service setting
 - [ ] `SESSION_SECRET` set (fixed random value)
 - [ ] App reachable at `*.azurewebsites.net` before adding the gateway

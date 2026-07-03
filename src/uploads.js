@@ -75,6 +75,19 @@ function checkQuota(files, newName, newSize, maxFiles, maxBytes) {
   return null;
 }
 
+// Quota check from aggregate counts (used by My Files, where usage comes from a
+// SQL COUNT/SUM). Duplicate names are rejected separately, so each upload is a
+// new file. Returns an error message, or null if there's room.
+function quotaFromCounts(count, bytes, addBytes, maxFiles, maxBytes) {
+  if (count + 1 > maxFiles) {
+    return `Storage limit reached. At most ${maxFiles} files here; delete a file to upload another.`;
+  }
+  if (Number(bytes) + Number(addBytes || 0) > maxBytes) {
+    return `Not enough space. This would exceed the ${humanSize(maxBytes)} limit (currently using ${humanSize(bytes)}). Delete a file to free space.`;
+  }
+  return null;
+}
+
 // Broad category for an extension, used for colored file badges + icons.
 function categoryOf(ext) {
   const e = String(ext || "").toLowerCase();
@@ -108,6 +121,7 @@ module.exports = {
   humanSize,
   usage,
   checkQuota,
+  quotaFromCounts,
   categoryOf,
   breakdown,
 };
