@@ -16,6 +16,7 @@ const {
   categoryOf,
   breakdown,
 } = require("./uploads");
+const { isDemo, DEMO_EMAIL } = require("./demo");
 
 function esc(value) {
   return String(value ?? "")
@@ -42,6 +43,8 @@ const ICONS = {
   folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
   folderPlus: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v5"/><path d="M9.5 13.5h5"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+  moon: '<path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"/>',
 };
 function icon(name) {
   // Icons are decorative; adjacent text provides the accessible name.
@@ -59,6 +62,15 @@ function brandMark() {
 
 const APP_NAME = "Azure Store Lab";
 
+// Runs in <head> before paint: apply the saved theme (or the OS preference) so
+// there's no light-to-dark flash on load. Kept apostrophe/backtick-free.
+const THEME_INIT_SCRIPT = `
+try { var t = localStorage.getItem("storelab-theme");
+  if (!t) t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  if (t === "dark") document.documentElement.setAttribute("data-theme", "dark");
+} catch (e) {}
+`;
+
 function htmlDoc(title, bodyHtml) {
   return `<!DOCTYPE html>
 <html lang="en">
@@ -67,6 +79,7 @@ function htmlDoc(title, bodyHtml) {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${esc(title)} · ${APP_NAME}</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <script>${THEME_INIT_SCRIPT}</script>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>${bodyHtml}</body>
@@ -88,7 +101,7 @@ function initials(name) {
     .toUpperCase();
 }
 
-// The signed-in app shell: sidebar nav + content area.
+// The signed-in app shell: top header + page tab row + content area.
 function appShell({ title, active, user, flash, body }) {
   const links = [
     { href: "/dashboard", key: "dashboard", label: "Dashboard", icon: "dashboard" },
@@ -98,26 +111,43 @@ function appShell({ title, active, user, flash, body }) {
   ]
     .map(
       (l) =>
-        `<a href="${l.href}" class="nav-link${l.key === active ? " active" : ""}" aria-label="${esc(l.label)}" title="${esc(l.label)}"${l.key === active ? ' aria-current="page"' : ""}>${icon(l.icon)}<span>${esc(l.label)}</span></a>`
+        `<a href="${l.href}" class="tab${l.key === active ? " active" : ""}"${l.key === active ? ' aria-current="page"' : ""}>${icon(l.icon)}<span>${esc(l.label)}</span></a>`
     )
     .join("");
 
   const shell = `
-  <div class="layout">
-    <aside class="sidebar">
-      <div class="brand"><span class="logo">${brandMark()}</span>${esc(APP_NAME)}</div>
-      <nav class="nav">${links}</nav>
-      <div class="sidebar-footer">
-        <div class="avatar">${esc(initials(user.name))}</div>
-        <div class="who">
-          <div class="who-name">${esc(user.name)}</div>
-          <div class="who-email">${esc(user.email)}</div>
+  <div class="app">
+    <header class="topbar">
+      <div class="topbar-inner">
+        <a class="brand" href="/dashboard">
+          <span class="logo">${brandMark()}</span>
+          <span class="brand-text">
+            <span class="brand-name">${esc(APP_NAME)}</span>${
+              isDemo ? '<span class="demo-badge" title="In-memory demo data; resets on restart">Demo</span>' : ""
+            }
+          </span>
+        </a>
+        <div class="topbar-actions">
+          <button class="icon-btn" type="button" data-theme-toggle title="Toggle dark mode" aria-label="Toggle dark mode">
+            <span class="theme-icon theme-icon-dark">${icon("moon")}</span>
+            <span class="theme-icon theme-icon-light">${icon("sun")}</span>
+          </button>
+          <div class="user-chip">
+            <span class="avatar">${esc(initials(user.name))}</span>
+            <span class="user-meta">
+              <span class="who-name">${esc(user.name)}</span>
+              <span class="who-email">${esc(user.email)}</span>
+            </span>
+          </div>
+          <form method="post" action="/logout">
+            <button class="icon-btn" type="submit" title="Sign out" aria-label="Sign out">${icon("logout")}</button>
+          </form>
         </div>
-        <form method="post" action="/logout">
-          <button class="icon-btn" type="submit" title="Sign out" aria-label="Sign out">${icon("logout")}</button>
-        </form>
       </div>
-    </aside>
+      <nav class="tabbar" aria-label="Primary">
+        <div class="tabbar-inner">${links}</div>
+      </nav>
+    </header>
     <main class="content">
       ${flashHtml(flash)}
       ${body}
@@ -134,7 +164,7 @@ function appShell({ title, active, user, flash, body }) {
       </div>
     </div>
   </div>
-  <script>${UPLOAD_WIDGET_SCRIPT}${LIGHTBOX_SCRIPT}${COPY_SCRIPT}${CONFIRM_DELETE_SCRIPT}${FORM_VALIDATION_SCRIPT}${SEARCH_SORT_SCRIPT}</script>`;
+  <script>${UPLOAD_WIDGET_SCRIPT}${LIGHTBOX_SCRIPT}${COPY_SCRIPT}${CONFIRM_DELETE_SCRIPT}${FORM_VALIDATION_SCRIPT}${SEARCH_SORT_SCRIPT}${THEME_TOGGLE_SCRIPT}</script>`;
 
   return htmlDoc(title, shell);
 }
@@ -316,6 +346,21 @@ const SEARCH_SORT_SCRIPT = `
 })();
 `;
 
+// Toggle light/dark and remember the choice. The no-flash init in <head> applies
+// it on the next load; this just flips it live.
+const THEME_TOGGLE_SCRIPT = `
+(function(){
+  document.addEventListener("click", function(e){
+    var btn = e.target.closest && e.target.closest("[data-theme-toggle]");
+    if(!btn) return;
+    var dark = document.documentElement.getAttribute("data-theme") === "dark";
+    if(dark) document.documentElement.removeAttribute("data-theme");
+    else document.documentElement.setAttribute("data-theme", "dark");
+    try{ localStorage.setItem("storelab-theme", dark ? "light" : "dark"); }catch(_){}
+  });
+})();
+`;
+
 function pageHeader(title, subtitle, serviceTag) {
   return `<div class="page-header">
     <h1>${esc(title)}</h1>
@@ -484,11 +529,11 @@ function storageCard(storage, bd) {
           `<li><span class="dot" style="background:${cat.color}"></span>${esc(cat.label)}<span class="muted">${esc(humanSize((bd && bd[cat.key]) || 0))}</span></li>`
       )
       .join("") +
-    `<li><span class="dot" style="background:#e6e9f0"></span>Free<span class="muted">${esc(humanSize(Math.max(0, storage.maxBytes - storage.bytes)))}</span></li>`;
+    `<li><span class="dot" style="background:var(--track)"></span>Free<span class="muted">${esc(humanSize(Math.max(0, storage.maxBytes - storage.bytes)))}</span></li>`;
   return `<div class="card storage-card">
     <div class="donut">
       <svg viewBox="0 0 128 128" width="132" height="132" role="img" aria-label="Storage used ${storage.pctBytes}%">
-        <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#eef1f6" stroke-width="${sw}"></circle>
+        <circle class="donut-track" cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke-width="${sw}"></circle>
         ${arcs}
       </svg>
       <div class="donut-center"><strong>${storage.pctBytes}%</strong><span class="muted">used</span></div>
@@ -518,13 +563,22 @@ function authShell({ title, heading, sub, body, flash }) {
 }
 
 function renderLogin(flash) {
+  const demoBlock = isDemo
+    ? `
+    <div class="auth-or"><span>demo mode</span></div>
+    <form method="post" action="/login">
+      <input type="hidden" name="email" value="${esc(DEMO_EMAIL)}">
+      <button class="btn secondary full" type="submit">Explore as demo user</button>
+    </form>
+    <p class="auth-switch">In-memory data, no Azure needed. Everything resets on restart.</p>`
+    : `<p class="auth-switch">New here? <a href="/signup">Create an account</a></p>`;
   const body = `
     <form class="stacked validated" method="post" action="/login">
       <label for="email">Email</label>
       <input type="email" id="email" name="email" placeholder="you@example.com" required autofocus>
       <button class="btn full" type="submit" style="margin-top:16px;">Sign in</button>
     </form>
-    <p class="auth-switch">New here? <a href="/signup">Create an account</a></p>`;
+    ${demoBlock}`;
   return authShell({
     title: "Sign in",
     heading: "Welcome back",
@@ -590,7 +644,7 @@ function renderDashboard({ user, myFiles, shared, members, storage, breakdown: b
     <div class="grid quick-links">
       ${quickLink("/files", "files", "My Files", "Upload and browse your own private files (Azure Blob Storage).")}
       ${quickLink("/shared", "shared", "Shared Files", "The area every member can read and write (Azure Files).")}
-      ${quickLink("/members", "members", "Members", "Everyone who has signed up (Azure Table Storage).")}
+      ${quickLink("/members", "members", "Members", "Everyone who has signed up (Azure SQL).")}
     </div>
     ${explainer([
       { op: "Your files + storage", call: "SELECT COUNT(*), SUM(size_bytes) FROM files WHERE owner_id = @you" },
@@ -699,10 +753,10 @@ function renderShared({ user, path, folders, files, flash }) {
     .map((name) => {
       const child = p ? p + "/" + name : name;
       return `<tr data-name="${esc(name)}" data-folder data-size="0" data-date="0">
-        <td><a class="folder-link" href="/shared?path=${encodeURIComponent(child)}">${icon("folder")}${esc(name)}</a></td>
-        <td class="muted"></td>
-        <td class="muted">Folder</td>
-        <td><div class="row-actions">${deleteForm("/shared/folder/delete", name, `<input type="hidden" name="name" value="${esc(name)}">${pathField}`)}</div></td>
+        <td data-label="Name"><a class="folder-link" href="/shared?path=${encodeURIComponent(child)}">${icon("folder")}${esc(name)}</a></td>
+        <td class="muted" data-label="Size"></td>
+        <td class="muted" data-label="Modified"></td>
+        <td data-label="Actions"><div class="row-actions">${deleteForm("/shared/folder/delete", name, `<input type="hidden" name="name" value="${esc(name)}">${pathField}`)}</div></td>
       </tr>`;
     })
     .join("");
@@ -710,10 +764,10 @@ function renderShared({ user, path, folders, files, flash }) {
   const fileRows = files
     .map(
       (f) => `<tr data-name="${esc(f.name)}" data-size="${Number(f.size) || 0}" data-date="${dateMs(f.lastModified)}">
-        <td>${esc(f.name)}</td>
-        <td class="muted">${esc(f.size != null ? humanSize(f.size) : "")}</td>
-        <td class="muted">${esc(f.lastModified ? formatDate(f.lastModified) : "")}</td>
-        <td><div class="row-actions">
+        <td data-label="Name">${esc(f.name)}</td>
+        <td class="muted" data-label="Size">${esc(f.size != null ? humanSize(f.size) : "")}</td>
+        <td class="muted" data-label="Modified">${esc(f.lastModified ? formatDate(f.lastModified) : "")}</td>
+        <td data-label="Actions"><div class="row-actions">
           ${iconBtn(f.url, "download", "Download")}
           ${iconBtn(f.shareUrl, "link", "Get a shareable link")}
           ${iconBtn(f.renameUrl, "edit", "Rename")}
@@ -729,7 +783,7 @@ function renderShared({ user, path, folders, files, flash }) {
           ${toolbar()}
           <div class="card table-card">
             <table>
-              <thead><tr><th>Name</th><th>Size</th><th>Type</th><th style="text-align:right;">Actions</th></tr></thead>
+              <thead><tr><th>Name</th><th>Size</th><th>Modified</th><th style="text-align:right;">Actions</th></tr></thead>
               <tbody data-items>${folderRows}${fileRows}</tbody>
             </table>
           </div>
@@ -752,15 +806,15 @@ function renderShared({ user, path, folders, files, flash }) {
   return appShell({ title: "Shared Files", active: "shared", user, flash, body });
 }
 
-// ---------- Members (Table Storage) ----------
+// ---------- Members (Azure SQL) ----------
 
 function renderMembers({ user, members, flash }) {
   const rows = members
     .map(
       (m) => `<tr>
-        <td><div style="display:flex;align-items:center;gap:10px;"><span class="avatar">${esc(initials(m.name))}</span>${esc(m.name)}${m.id === user.id ? ' <span class="muted">(you)</span>' : ""}</div></td>
-        <td>${esc(m.email)}</td>
-        <td class="muted">${esc(formatDate(m.createdAt))}</td>
+        <td data-label="Name"><div class="member-name"><span class="avatar">${esc(initials(m.name))}</span>${esc(m.name)}${m.id === user.id ? ' <span class="muted">(you)</span>' : ""}</div></td>
+        <td data-label="Email">${esc(m.email)}</td>
+        <td class="muted" data-label="Joined">${esc(formatDate(m.createdAt))}</td>
       </tr>`
     )
     .join("");

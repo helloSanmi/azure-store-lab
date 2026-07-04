@@ -10,31 +10,36 @@ const path = require("path");
 // Load .env from the project root regardless of where `node` is launched from.
 require("dotenv").config({ path: path.join(__dirname, ".env") });
 
-// Warn (but DON'T crash) if the connection string is missing or doesn't look
-// like a real one. The app still starts and serves pages; storage features stay
-// disabled until a valid connection string is set and the app is restarted.
-// This keeps a fresh deploy (and its health checks) alive before config is set.
-const CONN = process.env.AZURE_STORAGE_CONNECTION_STRING;
-const looksLikeConnString =
-  !!CONN &&
-  (/(^|;)\s*(AccountKey|SharedAccessSignature)=/.test(CONN) || /UseDevelopmentStorage=true/i.test(CONN));
-if (!looksLikeConnString) {
-  console.warn(
-    "\n[config] AZURE_STORAGE_CONNECTION_STRING is " +
-      (CONN ? "set but doesn't look like a connection string (it may be just the access key)." : "not set.") +
-      "\n  The app will start, but storage features are disabled until you set a valid\n" +
-      "  connection string (Storage account -> Access keys -> Connection string) and\n" +
-      "  restart. It should start with 'DefaultEndpointsProtocol=' and include\n" +
-      "  'AccountKey=' and 'EndpointSuffix='.\n"
-  );
-}
+const { isDemo } = require("./src/demo");
 
-// Same idea for the database: warn but don't crash if it isn't configured yet.
-if (!process.env.AZURE_SQL_CONNECTION_STRING) {
-  console.warn(
-    "[config] AZURE_SQL_CONNECTION_STRING is not set. The app will start, but " +
-      "accounts and My Files are disabled until you set it and restart."
+if (isDemo) {
+  console.log(
+    "\n[demo] DEMO MODE: using in-memory data, no Azure needed. Sign in with any\n" +
+      "  email (or click 'Explore as demo user'). Everything resets on restart.\n"
   );
+} else {
+  // Warn (but DON'T crash) if config is missing or doesn't look like a real
+  // connection string. The app still starts and serves pages; the affected
+  // features show a "setup needed" page until config is set and the app restarts.
+  const CONN = process.env.AZURE_STORAGE_CONNECTION_STRING;
+  const looksLikeConnString =
+    !!CONN &&
+    (/(^|;)\s*(AccountKey|SharedAccessSignature)=/.test(CONN) || /UseDevelopmentStorage=true/i.test(CONN));
+  if (!looksLikeConnString) {
+    console.warn(
+      "\n[config] AZURE_STORAGE_CONNECTION_STRING is " +
+        (CONN ? "set but doesn't look like a connection string (it may be just the access key)." : "not set.") +
+        "\n  Storage features are disabled until you set a valid connection string\n" +
+        "  (Storage account -> Access keys -> Connection string) and restart.\n" +
+        "  Tip: run `npm run demo` to explore with in-memory data instead.\n"
+    );
+  }
+  if (!process.env.AZURE_SQL_CONNECTION_STRING) {
+    console.warn(
+      "[config] AZURE_SQL_CONNECTION_STRING is not set. Accounts and My Files are " +
+        "disabled until you set it and restart. (Or run `npm run demo`.)"
+    );
+  }
 }
 
 const crypto = require("crypto");
@@ -86,7 +91,9 @@ app.use((err, req, res, next) => {
 // Create the DB tables if needed, then start listening. Schema failure is
 // non-fatal: the app still boots so it can serve the "setup needed" page.
 (async () => {
-  if (db.configured) {
+  if (isDemo) {
+    require("./src/demoBackend").seed();
+  } else if (db.configured) {
     try {
       await db.ensureSchema();
       console.log("[db] schema ready");

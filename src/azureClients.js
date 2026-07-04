@@ -8,6 +8,7 @@
 
 const { BlobServiceClient } = require("@azure/storage-blob");
 const { ShareServiceClient } = require("@azure/storage-file-share");
+const { isDemo } = require("./demo");
 
 const connectionString = process.env.AZURE_STORAGE_CONNECTION_STRING;
 
@@ -19,7 +20,13 @@ let shareServiceClient = null;
 let configured = false;
 let configError = null;
 
-if (connectionString) {
+if (isDemo) {
+  // In-memory storage: no Azure account needed.
+  const demo = require("./demoBackend");
+  blobServiceClient = demo.blobServiceClient;
+  shareServiceClient = demo.shareServiceClient;
+  configured = true;
+} else if (connectionString) {
   try {
     blobServiceClient = BlobServiceClient.fromConnectionString(connectionString);
     shareServiceClient = ShareServiceClient.fromConnectionString(connectionString);

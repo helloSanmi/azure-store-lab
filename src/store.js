@@ -130,7 +130,7 @@ async function renameFile(ownerId, fileId, newName) {
   });
 }
 
-module.exports = {
+const sqlStore = {
   listUsers,
   findUserByEmail,
   createUser,
@@ -142,3 +142,7 @@ module.exports = {
   deleteFileRecord,
   renameFile,
 };
+
+// In demo mode, swap the whole store for the in-memory one (same interface).
+const { isDemo } = require("./demo");
+module.exports = isDemo ? require("./demoBackend").store : sqlStore;

@@ -8,9 +8,12 @@
 const fs = require("fs");
 const path = require("path");
 const sql = require("mssql");
+const { isDemo } = require("./demo");
 
 const connectionString = process.env.AZURE_SQL_CONNECTION_STRING;
-const configured = !!connectionString;
+// In demo mode the store is in-memory, but requireDb checks this flag, so the
+// database "counts as configured" and DB-backed pages work.
+const configured = isDemo || !!connectionString;
 
 let poolPromise = null;
 
@@ -42,8 +45,9 @@ async function query(text, params) {
 }
 
 // Create the tables if they don't exist (runs schema.sql). Idempotent.
+// No-op in demo mode (the in-memory store has no schema).
 async function ensureSchema() {
-  if (!configured) return;
+  if (isDemo || !connectionString) return;
   const ddl = fs.readFileSync(path.join(__dirname, "..", "schema.sql"), "utf8");
   const pool = await getPool();
   await pool.request().batch(ddl);

@@ -72,6 +72,26 @@ database itself must exist first (on Azure it's provisioned separately).
 The app still boots if either is missing, it just shows a "setup needed" page
 for the affected features, so a fresh deploy won't crash-loop.
 
+## Try it instantly (demo mode)
+
+Want to click through the whole app without an Azure account, a database, or
+Docker? Run it in demo mode:
+
+```bash
+npm install
+npm run demo
+```
+
+Then open <http://localhost:3000> and click **Explore as demo user** (or sign in
+with any email). Demo mode swaps in an in-memory backend that stands in for both
+Azure SQL and Storage, and seeds a sample account with a few files and a shared
+folder so every page has something to show. Nothing leaves your machine and
+everything resets when you restart.
+
+Demo mode turns on automatically when neither connection string is set, or you
+can force it with `DEMO=1`. It is only for local exploration, do not run it in
+production (all data is in memory and lost on restart).
+
 ## Run it locally
 
 1. Install dependencies:
@@ -108,6 +128,7 @@ for the affected features, so a fresh deploy won't crash-loop.
 | `AZURE_STORAGE_CONNECTION_STRING` | yes | Connection string for the storage account (Blob for My Files, Azure Files for Shared). |
 | `SESSION_SECRET` | no | Secret used to sign session cookies. If unset, a random secret is generated per restart (sessions reset on restart). Set a fixed value (e.g. `openssl rand -hex 32`) for stable sessions. |
 | `PORT` | no | HTTP port (default `3000`). |
+| `DEMO` | no | Set to `1` to force in-memory demo mode (no Azure needed). Also auto-enables when both connection strings are unset. For local exploration only. |
 
 ### Upload rules
 
@@ -157,6 +178,8 @@ they reset when the app restarts, which is fine for a demo. See
 │   ├── azureClients.js    # Blob + Files clients from the storage connection string
 │   ├── uploads.js         # limits, allowed types, quota, categories
 │   ├── auth.js            # session/flash helpers, requireAuth/requireDb/requireStorage
+│   ├── demo.js            # demo-mode flag (on when DEMO=1 or no connection strings)
+│   ├── demoBackend.js     # in-memory stand-in for SQL + Storage, with seed data
 │   └── views.js           # all HTML rendering (shells, components, pages)
 ├── public/
 │   └── styles.css         # the single stylesheet
