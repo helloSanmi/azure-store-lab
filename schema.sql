@@ -36,3 +36,25 @@ CREATE INDEX IX_files_owner ON dbo.files(owner_id);
 -- A user can't have two files with the same name.
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_files_owner_name' AND object_id = OBJECT_ID(N'dbo.files'))
 CREATE UNIQUE INDEX UX_files_owner_name ON dbo.files(owner_id, display_name);
+
+-- Azure Blob access tier for each file: Hot / Cool / Archive. Added via ALTER so
+-- existing databases pick it up without recreating the table.
+IF COL_LENGTH(N'dbo.files', N'access_tier') IS NULL
+ALTER TABLE dbo.files ADD access_tier NVARCHAR(20) NOT NULL CONSTRAINT DF_files_tier DEFAULT 'Hot';
+
+-- Append-only activity log: who did what, when. A simple event table (the kind of
+-- thing NoSQL is also good at), read back with a JOIN to users for the actor name.
+IF OBJECT_ID(N'dbo.activity', N'U') IS NULL
+CREATE TABLE dbo.activity (
+    id          UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_activity PRIMARY KEY DEFAULT NEWID(),
+    actor_id    UNIQUEIDENTIFIER NOT NULL,
+    action      NVARCHAR(40)     NOT NULL,
+    target      NVARCHAR(255)    NULL,
+    area        NVARCHAR(20)     NOT NULL,
+    created_at  DATETIME2(0)     NOT NULL CONSTRAINT DF_activity_created DEFAULT SYSUTCDATETIME(),
+    CONSTRAINT FK_activity_actor FOREIGN KEY (actor_id) REFERENCES dbo.users(id) ON DELETE CASCADE
+);
+
+-- Fast "recent activity".
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_activity_created' AND object_id = OBJECT_ID(N'dbo.activity'))
+CREATE INDEX IX_activity_created ON dbo.activity(created_at DESC);

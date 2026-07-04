@@ -87,7 +87,8 @@ h1, h2, h3, h4 { letter-spacing: -.02em; font-weight: 680; line-height: 1.25; }
 }
 
 .topbar-actions { display: flex; align-items: center; gap: 8px; }
-.user-chip { display: flex; align-items: center; gap: 10px; padding: 0 4px; }
+.user-chip { display: flex; align-items: center; gap: 10px; padding: 4px 8px 4px 4px; border-radius: var(--radius-pill); color: var(--text); transition: background var(--ease); }
+.user-chip:hover { background: var(--surface-2); text-decoration: none; }
 .avatar {
   width: 36px; height: 36px; flex: none; border-radius: 50%;
   background: linear-gradient(140deg, #7c8cff, var(--primary-dark)); color: #fff;
@@ -273,6 +274,39 @@ tr:last-child td { border-bottom: none; }
 .action.danger:hover { background: var(--error-bg); color: var(--error-tx); }
 .action-form { display: inline; margin: 0; padding: 0; border: none; background: none; }
 
+/* ---------- Tile footer + access-tier selector ---------- */
+.tile-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.tier-form { margin: 0; }
+.tier-select {
+  font: inherit; font-size: .72rem; font-weight: 600; letter-spacing: .01em;
+  padding: 4px 8px; border-radius: var(--radius-pill); border: 1px solid var(--border-strong);
+  background: var(--surface-2); color: var(--text-soft); cursor: pointer; transition: var(--ease);
+}
+.tier-select:hover { border-color: var(--primary); }
+.tier-select.tier-hot { background: #fff4ed; color: #c2410c; border-color: #fed7aa; }
+.tier-select.tier-cool { background: #eff6ff; color: #1d4ed8; border-color: #bfdbfe; }
+.tier-select.tier-archive { background: var(--surface-2); color: var(--muted); border-color: var(--border-strong); }
+
+/* ---------- Activity feed ---------- */
+.activity-card { padding: 8px 4px; }
+.activity-list { list-style: none; margin: 0; padding: 0; }
+.activity-item { display: flex; align-items: center; gap: 12px; padding: 11px 18px; border-bottom: 1px solid var(--border); font-size: .9rem; }
+.activity-item:last-child { border-bottom: none; }
+.activity-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.activity-files { background: var(--primary); }
+.activity-shared { background: #0284c7; }
+.activity-account { background: #9333ea; }
+.activity-text { flex: 1; min-width: 0; color: var(--text-soft); overflow-wrap: anywhere; }
+.activity-text strong { color: var(--text); font-weight: 600; }
+.activity-target { color: var(--primary); font-weight: 600; }
+.activity-time { flex: none; font-size: .8rem; white-space: nowrap; }
+
+/* ---------- Account: danger zone ---------- */
+.danger-zone { display: flex; align-items: center; justify-content: space-between; gap: 20px; flex-wrap: wrap; border-color: var(--error-bd); }
+.danger-copy { flex: 1; min-width: 240px; }
+.danger-copy strong { color: var(--error-tx); }
+.danger-copy p { margin: 4px 0 0; font-size: .9rem; }
+
 /* ---------- Behind-the-scenes explainer ---------- */
 .explainer { margin-top: 32px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow-xs); }
 .explainer > summary { cursor: pointer; padding: 16px 22px; font-weight: 600; font-size: .92rem; color: var(--text); display: flex; align-items: center; gap: 10px; list-style: none; }
@@ -416,6 +450,11 @@ html[data-theme="dark"] .thumb.cat-image { background: rgba(16, 185, 129, .12); 
 html[data-theme="dark"] .file-drop:hover, html[data-theme="dark"] .file-drop.has-file { background: rgba(129, 140, 248, .1); }
 html[data-theme="dark"] .auth-wrap { background: radial-gradient(1100px 520px at 50% -8%, #1b2140 0%, var(--bg) 58%); }
 html[data-theme="dark"] .demo-badge { color: #c7d2fe; border-color: rgba(129, 140, 248, .3); }
+html[data-theme="dark"] .tier-select.tier-hot { background: rgba(234, 88, 12, .16); color: #fdba74; border-color: rgba(234, 88, 12, .35); }
+html[data-theme="dark"] .tier-select.tier-cool { background: rgba(37, 99, 235, .18); color: #93c5fd; border-color: rgba(37, 99, 235, .4); }
+html[data-theme="dark"] .tier-select.tier-archive { background: var(--surface-2); color: var(--muted); border-color: var(--border-strong); }
+html[data-theme="dark"] .activity-shared { background: #38bdf8; }
+html[data-theme="dark"] .activity-account { background: #d8b4fe; }
 
 /* ---------- Responsive ---------- */
 @media (max-width: 720px) {

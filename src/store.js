@@ -57,16 +57,18 @@ function toFile(row) {
     isImage: IMAGE_TYPES.test(row.content_type || ""),
     ext: fileExt(row.display_name),
     size: row.size_bytes,
+    tier: row.access_tier || "Hot",
     lastModified: row.uploaded_at,
     url: `/files/blob/${id}`,
     shareUrl: `/files/share/${id}`,
     renameUrl: `/files/rename/${id}`,
+    tierUrl: `/files/tier/${id}`,
   };
 }
 
 async function listUserFiles(ownerId) {
   const r = await query(
-    "SELECT id, display_name, content_type, size_bytes, uploaded_at FROM dbo.files WHERE owner_id = @owner ORDER BY uploaded_at DESC",
+    "SELECT id, display_name, content_type, size_bytes, access_tier, uploaded_at FROM dbo.files WHERE owner_id = @owner ORDER BY uploaded_at DESC",
     { owner: [sql.UniqueIdentifier, ownerId] }
   );
   return r.recordset.map(toFile);
@@ -74,7 +76,7 @@ async function listUserFiles(ownerId) {
 
 async function getFile(ownerId, fileId) {
   const r = await query(
-    "SELECT id, display_name, content_type, size_bytes, uploaded_at FROM dbo.files WHERE owner_id = @owner AND id = @id",
+    "SELECT id, display_name, content_type, size_bytes, access_tier, uploaded_at FROM dbo.files WHERE owner_id = @owner AND id = @id",
     { owner: [sql.UniqueIdentifier, ownerId], id: [sql.UniqueIdentifier, fileId] }
   );
   return r.recordset[0] ? toFile(r.recordset[0]) : null;
@@ -130,6 +132,64 @@ async function renameFile(ownerId, fileId, newName) {
   });
 }
 
+// Set a file's Azure Blob access tier (Hot / Cool / Archive). Just a metadata
+// UPDATE here; the route also asks Blob Storage to move the bytes to that tier.
+async function setFileTier(ownerId, fileId, tier) {
+  await query("UPDATE dbo.files SET access_tier = @tier WHERE owner_id = @owner AND id = @id", {
+    owner: [sql.UniqueIdentifier, ownerId],
+    id: [sql.UniqueIdentifier, fileId],
+    tier: [sql.NVarChar(20), tier],
+  });
+}
+
+// ---------- Account ----------
+
+async function updateUserName(userId, name) {
+  await query("UPDATE dbo.users SET name = @name WHERE id = @id", {
+    id: [sql.UniqueIdentifier, userId],
+    name: [sql.NVarChar(200), String(name).trim()],
+  });
+}
+
+// Delete the account row. The FKs (ON DELETE CASCADE) remove the user's file
+// rows and activity automatically; the route removes the blob container too.
+async function deleteUser(userId) {
+  await query("DELETE FROM dbo.users WHERE id = @id", { id: [sql.UniqueIdentifier, userId] });
+}
+
+// ---------- Activity (append-only log) ----------
+
+async function logActivity({ actorId, action, target, area }) {
+  await query(
+    "INSERT INTO dbo.activity (actor_id, action, target, area) VALUES (@actor, @action, @target, @area)",
+    {
+      actor: [sql.UniqueIdentifier, actorId],
+      action: [sql.NVarChar(40), action],
+      target: [sql.NVarChar(255), target || null],
+      area: [sql.NVarChar(20), area],
+    }
+  );
+}
+
+// Recent activity a viewer may see: everything in the shared area, plus the
+// viewer's own private/account actions (so nobody sees others' private files).
+async function listActivity(viewerId, limit) {
+  const r = await query(
+    `SELECT TOP (@limit) a.action, a.target, a.area, a.created_at, u.name AS actor_name
+       FROM dbo.activity a JOIN dbo.users u ON u.id = a.actor_id
+       WHERE a.area = 'shared' OR a.actor_id = @viewer
+       ORDER BY a.created_at DESC`,
+    { viewer: [sql.UniqueIdentifier, viewerId], limit: [sql.Int, Number(limit) || 10] }
+  );
+  return r.recordset.map((row) => ({
+    action: row.action,
+    target: row.target,
+    area: row.area,
+    actorName: row.actor_name,
+    createdAt: row.created_at,
+  }));
+}
+
 const sqlStore = {
   listUsers,
   findUserByEmail,
@@ -141,6 +201,11 @@ const sqlStore = {
   createFileRecord,
   deleteFileRecord,
   renameFile,
+  setFileTier,
+  updateUserName,
+  deleteUser,
+  logActivity,
+  listActivity,
 };
 
 // In demo mode, swap the whole store for the in-memory one (same interface).

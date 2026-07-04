@@ -11,9 +11,10 @@ const { DEMO_NAME, DEMO_EMAIL } = require("./demo");
 // ---- in-memory state ----
 const users = []; // { id, name, email, createdAt }
 const files = []; // { id, owner_id, display_name, content_type, size_bytes, uploaded_at }
-const blobs = new Map(); // containerId -> Map(blobName -> { buffer, contentType })
+const blobs = new Map(); // containerId -> Map(blobName -> { buffer, contentType, tier })
 const shared = new Map(); // dirPath ("" = root) -> { folders:Set, files:Map(name -> {buffer,contentType,size,lastModified}) }
 shared.set("", { folders: new Set(), files: new Map() });
+const activity = []; // { actor_id, action, target, area, created_at }
 
 // ---- store (mirrors src/store.js) ----
 function fileExt(n) { const i = String(n).lastIndexOf("."); return i >= 0 ? String(n).slice(i + 1) : ""; }
@@ -23,8 +24,9 @@ function toFile(f) {
   return {
     id, name: f.display_name, contentType: f.content_type || "",
     isImage: /^image\//.test(f.content_type || ""), ext: fileExt(f.display_name),
-    size: f.size_bytes, lastModified: f.uploaded_at,
+    size: f.size_bytes, tier: f.access_tier || "Hot", lastModified: f.uploaded_at,
     url: `/files/blob/${id}`, shareUrl: `/files/share/${id}`, renameUrl: `/files/rename/${id}`,
+    tierUrl: `/files/tier/${id}`,
   };
 }
 
@@ -41,11 +43,33 @@ const store = {
   async userUsage(ownerId) { const mine = files.filter((f) => f.owner_id === ownerId); return { count: mine.length, bytes: mine.reduce((s, f) => s + (Number(f.size_bytes) || 0), 0) }; },
   async createFileRecord({ ownerId, displayName, contentType, sizeBytes }) {
     const id = randomUUID();
-    files.push({ id, owner_id: ownerId, display_name: displayName, content_type: contentType || null, size_bytes: Number(sizeBytes) || 0, uploaded_at: new Date() });
+    files.push({ id, owner_id: ownerId, display_name: displayName, content_type: contentType || null, size_bytes: Number(sizeBytes) || 0, access_tier: "Hot", uploaded_at: new Date() });
     return id;
   },
   async deleteFileRecord(ownerId, fileId) { const i = files.findIndex((f) => f.owner_id === ownerId && f.id === fileId); if (i >= 0) files.splice(i, 1); },
   async renameFile(ownerId, fileId, newName) { const f = files.find((x) => x.owner_id === ownerId && x.id === fileId); if (f) f.display_name = newName; },
+  async setFileTier(ownerId, fileId, tier) { const f = files.find((x) => x.owner_id === ownerId && x.id === fileId); if (f) f.access_tier = tier; },
+  async updateUserName(userId, name) { const u = users.find((x) => x.id === userId); if (u) u.name = String(name).trim(); },
+  async deleteUser(userId) {
+    // Cascade: remove the user, their file rows + blobs, and their activity.
+    const i = users.findIndex((x) => x.id === userId); if (i >= 0) users.splice(i, 1);
+    for (let j = files.length - 1; j >= 0; j--) if (files[j].owner_id === userId) files.splice(j, 1);
+    blobs.delete(userId);
+    for (let j = activity.length - 1; j >= 0; j--) if (activity[j].actor_id === userId) activity.splice(j, 1);
+  },
+  async logActivity({ actorId, action, target, area }) {
+    activity.push({ actor_id: actorId, action, target: target || null, area, created_at: new Date() });
+  },
+  async listActivity(viewerId, limit) {
+    return activity
+      .filter((a) => a.area === "shared" || a.actor_id === viewerId)
+      .sort((a, b) => b.created_at - a.created_at)
+      .slice(0, Number(limit) || 10)
+      .map((a) => {
+        const u = users.find((x) => x.id === a.actor_id);
+        return { action: a.action, target: a.target, area: a.area, actorName: u ? u.name : "Someone", createdAt: a.created_at };
+      });
+  },
 };
 
 // ---- fake blob client (My Files bytes) ----
@@ -60,14 +84,16 @@ function blobContainerClient(containerId) {
   const c = blobs.get(containerId);
   return {
     async createIfNotExists() { if (!blobs.has(containerId)) blobs.set(containerId, new Map()); return {}; },
+    async deleteIfExists() { blobs.delete(containerId); return {}; },
     getBlockBlobClient(name) {
       return {
         async uploadData(buffer, opts) {
           const ct = (opts && opts.blobHTTPHeaders && opts.blobHTTPHeaders.blobContentType) || "application/octet-stream";
-          c.set(name, { buffer: Buffer.from(buffer), contentType: ct });
+          c.set(name, { buffer: Buffer.from(buffer), contentType: ct, tier: "Hot" });
         },
         async deleteIfExists() { c.delete(name); },
         async setHTTPHeaders() { /* no-op in demo */ },
+        async setAccessTier(tier) { const b = c.get(name); if (b) b.tier = tier; },
       };
     },
     getBlobClient(name) {
@@ -202,21 +228,22 @@ function seed() {
   seeded = true;
 
   const ada = { id: "3f2a1b4c-1111-2222-3333-abcdef012345", name: DEMO_NAME, email: DEMO_EMAIL, createdAt: new Date(Date.now() - 6 * 864e5) };
-  users.push(ada);
-  users.push({ id: randomUUID(), name: "Alan Turing", email: "alan@example.com", createdAt: new Date(Date.now() - 3 * 864e5) });
-  users.push({ id: randomUUID(), name: "Grace Hopper", email: "grace@example.com", createdAt: new Date(Date.now() - 1 * 864e5) });
+  const alan = { id: randomUUID(), name: "Alan Turing", email: "alan@example.com", createdAt: new Date(Date.now() - 3 * 864e5) };
+  const grace = { id: randomUUID(), name: "Grace Hopper", email: "grace@example.com", createdAt: new Date(Date.now() - 1 * 864e5) };
+  users.push(ada, alan, grace);
 
   // Ada's private files (metadata + blob bytes under her container).
-  function addFile(name, type, buffer) {
+  function addFile(name, type, buffer, tier) {
     const id = randomUUID();
-    files.push({ id, owner_id: ada.id, display_name: name, content_type: type, size_bytes: buffer.length, uploaded_at: new Date(Date.now() - Math.floor(Math.random() * 5) * 36e5) });
+    const t = tier || "Hot";
+    files.push({ id, owner_id: ada.id, display_name: name, content_type: type, size_bytes: buffer.length, access_tier: t, uploaded_at: new Date(Date.now() - Math.floor(Math.random() * 5) * 36e5) });
     if (!blobs.has(ada.id)) blobs.set(ada.id, new Map());
-    blobs.get(ada.id).set(id, { buffer, contentType: type });
+    blobs.get(ada.id).set(id, { buffer, contentType: type, tier: t });
   }
   addFile("welcome.png", "image/png", IMG_WELCOME);
   addFile("project-brief.pdf", "application/pdf", Buffer.from("%PDF-1.4 demo project brief"));
-  addFile("q3-budget.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", Buffer.from("demo spreadsheet bytes"));
-  addFile("intro-clip.mp4", "video/mp4", Buffer.from("demo video bytes ".repeat(64)));
+  addFile("q3-budget.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", Buffer.from("demo spreadsheet bytes"), "Cool");
+  addFile("intro-clip.mp4", "video/mp4", Buffer.from("demo video bytes ".repeat(64)), "Archive");
 
   // Shared area: a couple of root files + a folder with a file.
   const root = dirEntry("");
@@ -225,6 +252,17 @@ function seed() {
   root.folders.add("designs");
   const designs = dirEntry("designs");
   designs.files.set("homepage-mockup.png", { buffer: IMG_MOCKUP, contentType: "image/png", size: IMG_MOCKUP.length, lastModified: new Date() });
+
+  // A little activity history so the dashboard feed has something to show.
+  // (shared actions are visible to everyone; private/account ones only to the actor.)
+  const mins = (n) => new Date(Date.now() - n * 60000);
+  activity.push(
+    { actor_id: ada.id, action: "uploaded", target: "welcome.png", area: "files", created_at: mins(12) },
+    { actor_id: grace.id, action: "uploaded", target: "brand-logo.png", area: "shared", created_at: mins(48) },
+    { actor_id: alan.id, action: "created folder", target: "designs", area: "shared", created_at: mins(180) },
+    { actor_id: ada.id, action: "set Cool tier on", target: "q3-budget.xlsx", area: "files", created_at: mins(320) },
+    { actor_id: grace.id, action: "uploaded", target: "team-handbook.pdf", area: "shared", created_at: mins(1440) }
+  );
 }
 
 module.exports = { store, blobServiceClient, shareServiceClient, seed };

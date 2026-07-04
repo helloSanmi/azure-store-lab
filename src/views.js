@@ -45,6 +45,8 @@ const ICONS = {
   search: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>',
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
   moon: '<path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"/>',
+  user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
+  layers: '<path d="m12 2 9 5-9 5-9-5 9-5z"/><path d="m3 12 9 5 9-5"/><path d="m3 17 9 5 9-5"/>',
 };
 function icon(name) {
   // Icons are decorative; adjacent text provides the accessible name.
@@ -108,6 +110,7 @@ function appShell({ title, active, user, flash, body }) {
     { href: "/files", key: "files", label: "My Files", icon: "files" },
     { href: "/shared", key: "shared", label: "Shared Files", icon: "shared" },
     { href: "/members", key: "members", label: "Members", icon: "members" },
+    { href: "/account", key: "account", label: "Account", icon: "user" },
   ]
     .map(
       (l) =>
@@ -132,13 +135,13 @@ function appShell({ title, active, user, flash, body }) {
             <span class="theme-icon theme-icon-dark">${icon("moon")}</span>
             <span class="theme-icon theme-icon-light">${icon("sun")}</span>
           </button>
-          <div class="user-chip">
+          <a class="user-chip" href="/account" title="Account">
             <span class="avatar">${esc(initials(user.name))}</span>
             <span class="user-meta">
               <span class="who-name">${esc(user.name)}</span>
               <span class="who-email">${esc(user.email)}</span>
             </span>
-          </div>
+          </a>
           <form method="post" action="/logout">
             <button class="icon-btn" type="submit" title="Sign out" aria-label="Sign out">${icon("logout")}</button>
           </form>
@@ -164,7 +167,7 @@ function appShell({ title, active, user, flash, body }) {
       </div>
     </div>
   </div>
-  <script>${UPLOAD_WIDGET_SCRIPT}${LIGHTBOX_SCRIPT}${COPY_SCRIPT}${CONFIRM_DELETE_SCRIPT}${FORM_VALIDATION_SCRIPT}${SEARCH_SORT_SCRIPT}${THEME_TOGGLE_SCRIPT}</script>`;
+  <script>${UPLOAD_WIDGET_SCRIPT}${LIGHTBOX_SCRIPT}${COPY_SCRIPT}${CONFIRM_DELETE_SCRIPT}${FORM_VALIDATION_SCRIPT}${SEARCH_SORT_SCRIPT}${TIER_SCRIPT}${THEME_TOGGLE_SCRIPT}</script>`;
 
   return htmlDoc(title, shell);
 }
@@ -361,12 +364,71 @@ const THEME_TOGGLE_SCRIPT = `
 })();
 `;
 
+// Auto-submit the little access-tier selector when it changes (no Set button
+// needed). Kept apostrophe-free so it survives template-literal embedding.
+const TIER_SCRIPT = `
+(function(){
+  document.addEventListener("change", function(e){
+    var sel = e.target;
+    if(sel && sel.matches && sel.matches("[data-tier-select]")){
+      var form = sel.closest("form");
+      if(form) form.submit();
+    }
+  });
+})();
+`;
+
 function pageHeader(title, subtitle, serviceTag) {
   return `<div class="page-header">
     <h1>${esc(title)}</h1>
     ${subtitle ? `<p>${esc(subtitle)}</p>` : ""}
     ${serviceTag ? `<span class="service-tag">${esc(serviceTag)}</span>` : ""}
   </div>`;
+}
+
+// A friendly relative time ("just now", "5m ago", "2d ago"), falling back to a
+// date for anything older than a week.
+function relativeTime(value) {
+  const d = value instanceof Date ? value : new Date(value);
+  if (isNaN(d)) return "";
+  const s = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
+  if (s < 45) return "just now";
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const days = Math.floor(h / 24);
+  if (days < 7) return `${days}d ago`;
+  return formatDate(d);
+}
+
+// The dashboard activity feed. Each item: who did what, to what, when. A colored
+// dot encodes the area (files / shared / account).
+function activityFeed(items) {
+  if (!items || !items.length) return `<div class="empty-inline">No activity yet. Upload or change something to see it here.</div>`;
+  const rows = items
+    .map((a) => {
+      const area = a.area === "shared" ? "shared" : a.area === "account" ? "account" : "files";
+      return `<li class="activity-item">
+        <span class="activity-dot activity-${area}" title="${esc(area)}"></span>
+        <span class="activity-text"><strong>${esc(a.actorName)}</strong> ${esc(a.action)}${a.target ? ` <span class="activity-target">${esc(a.target)}</span>` : ""}</span>
+        <span class="activity-time muted">${esc(relativeTime(a.createdAt))}</span>
+      </li>`;
+    })
+    .join("");
+  return `<ul class="activity-list">${rows}</ul>`;
+}
+
+// The per-file Azure Blob access-tier selector (My Files only; Azure Files has
+// no tiers). Auto-submits via TIER_SCRIPT.
+function tierControl(file) {
+  const tiers = ["Hot", "Cool", "Archive"];
+  const cur = String(file.tier || "Hot");
+  const opts = tiers.map((t) => `<option value="${t}"${t === cur ? " selected" : ""}>${t}</option>`).join("");
+  return `<form class="tier-form" method="post" action="${file.tierUrl}">
+    <select class="tier-select tier-${esc(cur.toLowerCase())}" name="tier" data-tier-select title="Azure Blob access tier" aria-label="Access tier for ${esc(file.name)}">${opts}</select>
+    <noscript><button class="btn secondary" type="submit">Set tier</button></noscript>
+  </form>`;
 }
 
 // Polished single-file upload widget. The limits/types are shown up front; a
@@ -404,7 +466,7 @@ function explainer(calls) {
     .map((c) => `<li><span class="op">${esc(c.op)}</span><code>${esc(c.call)}</code></li>`)
     .join("");
   return `<details class="explainer">
-    <summary>${icon("cloud")} Behind the scenes: the Azure SDK calls this page uses</summary>
+    <summary>${icon("cloud")} Behind the scenes: what this page runs (with real values)</summary>
     <ul>${items}</ul>
   </details>`;
 }
@@ -442,7 +504,7 @@ function meterState(pct) {
 }
 
 // A small two-bar usage meter (files used / max, storage used / max).
-function usageMeter(u, compact) {
+function usageMeter(u, compact, title) {
   if (!u) return "";
   const row = (label, used, max, pct) => `
     <div class="usage-row">
@@ -450,6 +512,7 @@ function usageMeter(u, compact) {
       <div class="meter"><div class="meter-fill ${meterState(pct)}" style="width:${pct}%"></div></div>
     </div>`;
   return `<div class="usage card${compact ? " compact" : ""}">
+    ${title ? `<h2 class="section-title">${esc(title)}</h2>` : ""}
     ${row("Files", String(u.count), String(u.maxFiles), u.pctFiles)}
     ${row("Storage", humanSize(u.bytes), humanSize(u.maxBytes), u.pctBytes)}
   </div>`;
@@ -628,7 +691,7 @@ function quickLink(href, iconName, title, desc) {
   </a>`;
 }
 
-function renderDashboard({ user, myFiles, shared, members, storage, breakdown: bd, flash }) {
+function renderDashboard({ user, myFiles, shared, members, storage, breakdown: bd, activity, flash }) {
   const storageBlock = storage
     ? `<h2 class="section-title">Your storage</h2>${storageCard(storage, bd || {})}`
     : "";
@@ -640,6 +703,8 @@ function renderDashboard({ user, myFiles, shared, members, storage, breakdown: b
       ${statCard("Members", members, "members")}
     </div>
     ${storageBlock}
+    <h2 class="section-title">Recent activity</h2>
+    <div class="card activity-card">${activityFeed(activity)}</div>
     <h2 class="section-title">Quick actions</h2>
     <div class="grid quick-links">
       ${quickLink("/files", "files", "My Files", "Upload and browse your own private files (Azure Blob Storage).")}
@@ -647,9 +712,19 @@ function renderDashboard({ user, myFiles, shared, members, storage, breakdown: b
       ${quickLink("/members", "members", "Members", "Everyone who has signed up (Azure SQL).")}
     </div>
     ${explainer([
-      { op: "Your files + storage", call: "SELECT COUNT(*), SUM(size_bytes) FROM files WHERE owner_id = @you" },
-      { op: "Shared file count", call: "share.rootDirectoryClient.listFilesAndDirectories()  (Azure Files)" },
-      { op: "Member count", call: "SELECT COUNT(*) FROM users" },
+      { op: "Your files + storage", call:
+`SELECT COUNT(*) AS count, SUM(size_bytes) AS bytes
+FROM files WHERE owner_id = @owner
+-- @owner = '${user.id}'   ->   ${myFiles} file(s)` },
+      { op: "Shared file count", call:
+`share.rootDirectoryClient.listFilesAndDirectories()   // Azure Files
+// -> ${shared} file(s) in the shared root` },
+      { op: "Member count", call: `SELECT COUNT(*) FROM users   -- -> ${members}` },
+      { op: "Recent activity", call:
+`SELECT TOP 8 a.action, a.target, a.created_at, u.name
+FROM activity a JOIN users u ON u.id = a.actor_id
+WHERE a.area = 'shared' OR a.actor_id = @you
+ORDER BY a.created_at DESC` },
     ])}`;
   return appShell({ title: "Dashboard", active: "dashboard", user, flash, body });
 }
@@ -691,26 +766,18 @@ function fileTile(file) {
         <span class="name">${esc(file.name)}</span>
         ${meta ? `<span class="size muted">${meta}</span>` : ""}
       </div>
-      <div class="tile-actions">
-        ${iconBtn(file.url, "download", "Download")}
-        ${iconBtn(file.shareUrl, "link", "Get a shareable link")}
-        ${iconBtn(file.renameUrl, "edit", "Rename")}
-        ${deleteForm("/files/delete", file.name, `<input type="hidden" name="id" value="${esc(file.id)}">`)}
+      <div class="tile-foot">
+        ${tierControl(file)}
+        <div class="tile-actions">
+          ${iconBtn(file.url, "download", "Download")}
+          ${iconBtn(file.shareUrl, "link", "Get a shareable link")}
+          ${iconBtn(file.renameUrl, "edit", "Rename")}
+          ${deleteForm("/files/delete", file.name, `<input type="hidden" name="id" value="${esc(file.id)}">`)}
+        </div>
       </div>
     </div>
   </div>`;
 }
-
-const FILES_CALLS = [
-  { op: "List your files", call: "SELECT * FROM files WHERE owner_id = @you ORDER BY uploaded_at DESC" },
-  { op: "Search / sort", call: "... WHERE display_name LIKE @q   ORDER BY size_bytes DESC" },
-  { op: "Upload", call: "INSERT INTO files (...)   +   blockBlobClient.uploadData(bytes)" },
-  { op: "Preview / download", call: "SELECT ... WHERE id = @id   +   blobClient.download()" },
-  { op: "Rename", call: "UPDATE files SET display_name = @new   (the bytes never move)" },
-  { op: "Delete", call: "DELETE FROM files ...   +   blockBlobClient.deleteIfExists()" },
-  { op: "Usage / quota", call: "SELECT COUNT(*), SUM(size_bytes) FROM files WHERE owner_id = @you" },
-  { op: "Shareable link", call: 'blobClient.generateSasUrl({ permissions: "r", expiresOn })' },
-];
 
 function renderFiles({ user, files, flash }) {
   const gallery = files.length
@@ -721,6 +788,22 @@ function renderFiles({ user, files, flash }) {
       </div>`
     : emptyState("No files yet. Upload your first file above.");
   const u = usage(files, MAX_FILES_PER_USER, MAX_BYTES_PER_USER);
+  const example = files[0];
+  const calls = [
+    { op: "List your files", call:
+`SELECT id, display_name, size_bytes, access_tier, uploaded_at
+FROM files WHERE owner_id = @owner
+-- @owner = '${user.id}'   ->   ${files.length} row(s)
+ORDER BY uploaded_at DESC` },
+    { op: "Upload", call: "INSERT INTO files (...) VALUES (...)   +   blockBlobClient.uploadData(bytes)" },
+    { op: "Set access tier", call: 'UPDATE files SET access_tier = @tier   +   blockBlobClient.setAccessTier("Cool")' },
+    { op: "Preview / download", call:
+`SELECT ... FROM files WHERE owner_id = @owner AND id = @id${example ? `   -- @id = '${example.id}'` : ""}
++ blobClient.download()` },
+    { op: "Rename", call: "UPDATE files SET display_name = @new   (the bytes never move)" },
+    { op: "Delete", call: "DELETE FROM files WHERE id = @id   +   blockBlobClient.deleteIfExists()" },
+    { op: "Shareable link", call: 'blobClient.generateSasUrl({ permissions: "r", expiresOn })' },
+  ];
 
   const body = `
     ${pageHeader("My Files", "Your own private file area. Only you can see these. Images preview inline; everything else gets a download link.", "Azure Blob Storage · container per user")}
@@ -729,21 +812,25 @@ function renderFiles({ user, files, flash }) {
       ${usageMeter(u)}
     </div>
     ${gallery}
-    ${explainer(FILES_CALLS)}`;
+    ${explainer(calls)}`;
   return appShell({ title: "My Files", active: "files", user, flash, body });
 }
 
 // ---------- Shared Files (Azure Files) ----------
 
-const SHARED_CALLS = [
-  { op: "List a folder", call: "share.getDirectoryClient(path).listFilesAndDirectories()" },
-  { op: "Create a folder", call: "share.getDirectoryClient(childPath).createIfNotExists()" },
-  { op: "Upload into folder", call: "directoryClient.getFileClient(name).uploadData(buffer)" },
-  { op: "Download", call: "fileClient.download()" },
-  { op: "Rename (copy + delete)", call: "download() → uploadData() → deleteIfExists()" },
-  { op: "Delete file / empty folder", call: "fileClient.deleteIfExists() / dirClient.deleteIfExists()" },
-  { op: "Shareable link", call: 'fileClient.generateSasUrl({ permissions: "r", expiresOn })' },
-];
+function sharedCalls(p, folders, files) {
+  return [
+    { op: "List this folder", call:
+`share.getDirectoryClient("${p || "(root)"}").listFilesAndDirectories()
+// -> ${folders.length} folder(s), ${files.length} file(s)` },
+    { op: "Create a folder", call: "share.getDirectoryClient(childPath).createIfNotExists()" },
+    { op: "Upload into folder", call: "directoryClient.getFileClient(name).uploadData(buffer)" },
+    { op: "Download", call: "fileClient.download()" },
+    { op: "Rename (copy + delete)", call: "download() -> uploadData() -> deleteIfExists()" },
+    { op: "Delete file / empty folder", call: "fileClient.deleteIfExists() / dirClient.deleteIfExists()" },
+    { op: "Shareable link", call: 'fileClient.generateSasUrl({ permissions: "r", expiresOn })' },
+  ];
+}
 
 function renderShared({ user, path, folders, files, flash }) {
   const p = path || "";
@@ -802,7 +889,7 @@ function renderShared({ user, path, folders, files, flash }) {
     </div>
     ${newFolderForm(p)}
     ${list}
-    ${explainer(SHARED_CALLS)}`;
+    ${explainer(sharedCalls(p, folders, files))}`;
   return appShell({ title: "Shared Files", active: "shared", user, flash, body });
 }
 
@@ -826,12 +913,55 @@ function renderMembers({ user, members, flash }) {
     ${pageHeader("Members", "Everyone who has signed up. Each is one row in the users table.", "Azure SQL · table “users”")}
     ${table}
     ${explainer([
-      { op: "List all members", call: "SELECT * FROM users ORDER BY created_at DESC" },
+      { op: "List all members", call: `SELECT id, name, email, created_at FROM users ORDER BY created_at DESC   -- ${members.length} row(s)` },
       { op: "Find by email (sign in)", call: "SELECT TOP 1 * FROM users WHERE email = @email" },
       { op: "Create member (sign up)", call: "INSERT INTO users (id, name, email) VALUES (...)" },
     ])}
     ${nosqlVsSqlPanel()}`;
   return appShell({ title: "Members", active: "members", user, flash, body });
+}
+
+// ---------- Account (Azure SQL: your own user row) ----------
+
+function renderAccount({ user, storage, flash }) {
+  const footprint = storage
+    ? usageMeter(storage, false, "Storage footprint")
+    : `<div class="card"><h2 class="section-title">Storage footprint</h2><p class="muted" style="margin:0;">Usage is unavailable right now.</p></div>`;
+  const body = `
+    ${pageHeader("Account", "Your profile and how much storage you're using.", "Azure SQL · table “users”")}
+    <div class="split">
+      <div class="card">
+        <h2 class="section-title">Profile</h2>
+        <form class="stacked validated" method="post" action="/account/name">
+          <label for="acc-name">Display name</label>
+          <input type="text" id="acc-name" name="name" value="${esc(user.name)}" maxlength="200" required autocomplete="name">
+          <label for="acc-email">Email</label>
+          <input type="email" id="acc-email" value="${esc(user.email)}" disabled>
+          <button class="btn" type="submit" style="margin-top:16px;align-self:flex-start;">Save changes</button>
+        </form>
+      </div>
+      ${footprint}
+    </div>
+    <h2 class="section-title" style="margin-top:6px;">Danger zone</h2>
+    <div class="card danger-zone">
+      <div class="danger-copy">
+        <strong>Delete your account</strong>
+        <p class="muted">Removes your user row. Your files (metadata and blobs) and activity are deleted automatically by the database's ON DELETE CASCADE. This can't be undone.</p>
+      </div>
+      <form method="post" action="/account/delete" class="action-form" data-confirm-label="your account">
+        <button class="btn danger" type="submit">Delete account</button>
+      </form>
+    </div>
+    ${explainer([
+      { op: "Update your name", call: `UPDATE users SET name = @name WHERE id = @id   -- '${user.id}'` },
+      { op: "Delete account (cascade)", call:
+`DELETE FROM users WHERE id = @id
+-- ON DELETE CASCADE then removes your rows in:
+--   files      (your file metadata)
+--   activity   (your logged actions)
+-- the app also deletes your Blob container` },
+    ])}`;
+  return appShell({ title: "Account", active: "account", user, flash, body });
 }
 
 function formatDate(iso) {
@@ -938,6 +1068,7 @@ module.exports = {
   renderFiles,
   renderShared,
   renderMembers,
+  renderAccount,
   renderShareLink,
   renderRename,
   renderNotConfigured,

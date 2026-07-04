@@ -12,7 +12,7 @@ const { FileSASPermissions } = require("@azure/storage-file-share");
 const { blobServiceClient, shareServiceClient, SHARED_FILE_SHARE } = require("../src/azureClients");
 const store = require("../src/store");
 const { currentUser, requireAuth, requireStorage, requireDb, setFlash, takeFlash } = require("../src/auth");
-const { renderDashboard, renderFiles, renderShared, renderMembers, renderShareLink, renderRename } = require("../src/views");
+const { renderDashboard, renderFiles, renderShared, renderMembers, renderShareLink, renderRename, renderAccount } = require("../src/views");
 const {
   MAX_FILE_BYTES,
   MAX_FILE_LABEL,
@@ -29,6 +29,16 @@ const {
 
 // How long a generated shareable (SAS) link stays valid.
 const SAS_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+// Azure Blob access tiers, cheapest-to-access first.
+const ACCESS_TIERS = ["Hot", "Cool", "Archive"];
+
+// Record an action in the activity log. Best-effort: a teaching feature must
+// never break a real operation, so failures are swallowed and not awaited.
+function logActivity(user, action, target, area) {
+  if (!user) return;
+  Promise.resolve(store.logActivity({ actorId: user.id, action, target, area })).catch(() => {});
+}
 
 // Uploads buffered in memory, streamed straight to Azure. Size is capped here
 // so multer aborts oversize uploads before buffering the whole thing.
@@ -166,7 +176,9 @@ router.get("/dashboard", async (req, res, next) => {
     } catch (e) { /* keep "n/a" */ }
     try { shared = (await listSharedDir("")).files.length; } catch (e) { /* keep "n/a" */ }
     try { members = (await store.listUsers()).length; } catch (e) { /* keep "n/a" */ }
-    res.send(renderDashboard({ user, myFiles, shared, members, storage, breakdown: bd, flash: takeFlash(req) }));
+    let activity = [];
+    try { activity = await store.listActivity(user.id, 8); } catch (e) { /* keep [] */ }
+    res.send(renderDashboard({ user, myFiles, shared, members, storage, breakdown: bd, activity, flash: takeFlash(req) }));
   } catch (err) {
     next(err);
   }
@@ -225,6 +237,7 @@ router.post("/files/upload", handleUpload("/files"), async (req, res, next) => {
       await store.deleteFileRecord(user.id, fileId).catch(() => {});
       throw e;
     }
+    logActivity(user, "uploaded", name, "files");
     res.redirect("/files");
   } catch (err) {
     next(err);
@@ -273,6 +286,7 @@ router.post("/files/delete", async (req, res, next) => {
     }
     await userContainer(user.id).getBlockBlobClient(id).deleteIfExists();
     await store.deleteFileRecord(user.id, id);
+    logActivity(user, "deleted", file.name, "files");
     setFlash(req, "success", `Deleted “${file.name}”.`);
     res.redirect("/files");
   } catch (err) {
@@ -349,8 +363,89 @@ router.post("/files/rename", async (req, res, next) => {
         blobContentDisposition: contentDisposition(newName),
       });
     } catch (e) { /* header refresh is best-effort */ }
+    logActivity(user, "renamed a file to", newName, "files");
     setFlash(req, "success", `Renamed to “${newName}”.`);
     res.redirect("/files");
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Move one of the user's files to a different Azure Blob access tier
+// (Hot / Cool / Archive). Records the tier in SQL and asks Blob Storage to move
+// the bytes (best-effort: not every account type / emulator supports tiering).
+router.post("/files/tier/:id", async (req, res, next) => {
+  try {
+    const user = currentUser(req);
+    if (!isGuid(req.params.id)) return res.status(400).send("Invalid file id");
+    const tier = String(req.body.tier || "");
+    if (!ACCESS_TIERS.includes(tier)) {
+      setFlash(req, "error", "Invalid access tier.");
+      return res.redirect("/files");
+    }
+    const file = await store.getFile(user.id, req.params.id);
+    if (!file) {
+      setFlash(req, "error", "That file no longer exists.");
+      return res.redirect("/files");
+    }
+    if (file.tier === tier) return res.redirect("/files");
+    await store.setFileTier(user.id, req.params.id, tier);
+    try {
+      await userContainer(user.id).getBlockBlobClient(req.params.id).setAccessTier(tier);
+    } catch (e) { /* tier is recorded in SQL regardless */ }
+    logActivity(user, `set ${tier} tier on`, file.name, "files");
+    setFlash(req, "success", `“${file.name}” moved to the ${tier} tier.`);
+    res.redirect("/files");
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------- Account (SQL: your user row) ----------
+router.get("/account", async (req, res, next) => {
+  try {
+    const user = currentUser(req);
+    let storage = null;
+    try {
+      storage = usage(await store.listUserFiles(user.id), MAX_FILES_PER_USER, MAX_BYTES_PER_USER);
+    } catch (e) { /* footprint is best-effort */ }
+    res.send(renderAccount({ user, storage, flash: takeFlash(req) }));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Update your display name (a plain UPDATE on your own row).
+router.post("/account/name", async (req, res, next) => {
+  try {
+    const user = currentUser(req);
+    const name = String(req.body.name || "").trim();
+    if (!name || name.length > 200) {
+      setFlash(req, "error", "Please enter a valid name (1-200 characters).");
+      return res.redirect("/account");
+    }
+    if (name === user.name) return res.redirect("/account");
+    await store.updateUserName(user.id, name);
+    req.session.user.name = name; // keep the signed-in session in sync
+    logActivity(user, "updated their display name", null, "account");
+    setFlash(req, "success", "Your name has been updated.");
+    req.session.save(() => res.redirect("/account"));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Delete your account. Removes your private blob container (all your bytes),
+// then your user row; the ON DELETE CASCADE foreign keys wipe your file rows
+// and activity automatically. Then the session is destroyed.
+router.post("/account/delete", async (req, res, next) => {
+  try {
+    const user = currentUser(req);
+    try {
+      await userContainer(user.id).deleteIfExists();
+    } catch (e) { /* best-effort: the SQL cascade is the source of truth */ }
+    await store.deleteUser(user.id);
+    req.session.destroy(() => res.redirect("/login"));
   } catch (err) {
     next(err);
   }
@@ -410,6 +505,7 @@ router.post("/shared/upload", handleUpload((req) => sharedBack(sanitizePath(req.
     await sharedDir(p).getFileClient(name).uploadData(req.file.buffer, {
       fileHttpHeaders: { fileContentType: req.file.mimetype },
     });
+    logActivity(currentUser(req), "uploaded", name, "shared");
     res.redirect(back);
   } catch (err) {
     next(err);
@@ -434,6 +530,7 @@ router.post("/shared/folder", async (req, res, next) => {
     const share = shareServiceClient.getShareClient(SHARED_FILE_SHARE);
     await share.createIfNotExists();
     await share.getDirectoryClient(childPath).createIfNotExists();
+    logActivity(currentUser(req), "created folder", name, "shared");
     setFlash(req, "success", `Folder “${name}” created.`);
     res.redirect(back);
   } catch (err) {
@@ -458,6 +555,7 @@ router.post("/shared/folder/delete", async (req, res, next) => {
     const childPath = p ? p + "/" + name : name;
     try {
       await shareServiceClient.getShareClient(SHARED_FILE_SHARE).getDirectoryClient(childPath).deleteIfExists();
+      logActivity(currentUser(req), "deleted folder", name, "shared");
       setFlash(req, "success", `Deleted folder “${name}”.`);
     } catch (e) {
       // Azure Files won't delete a non-empty directory.
@@ -507,6 +605,7 @@ router.post("/shared/delete", async (req, res, next) => {
       return res.redirect(back);
     }
     await sharedDir(p).getFileClient(name).deleteIfExists();
+    logActivity(currentUser(req), "deleted", name, "shared");
     setFlash(req, "success", `Deleted “${name}”.`);
     res.redirect(back);
   } catch (err) {
@@ -584,6 +683,7 @@ router.post("/shared/rename", async (req, res, next) => {
       fileHttpHeaders: { fileContentType: props.contentType || "application/octet-stream" },
     });
     await src.deleteIfExists();
+    logActivity(currentUser(req), "renamed a file to", newName, "shared");
     setFlash(req, "success", `Renamed to “${newName}”.`);
     res.redirect(back);
   } catch (err) {
