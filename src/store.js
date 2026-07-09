@@ -59,6 +59,7 @@ function toFile(row) {
     size: row.size_bytes,
     tier: row.access_tier || "Hot",
     lastModified: row.uploaded_at,
+    deletedAt: row.deleted_at || null,
     url: `/files/blob/${id}`,
     shareUrl: `/files/share/${id}`,
     renameUrl: `/files/rename/${id}`,
@@ -66,17 +67,37 @@ function toFile(row) {
   };
 }
 
+// Active files only (deleted_at IS NULL). Soft-deleted files live in the bin.
 async function listUserFiles(ownerId) {
   const r = await query(
-    "SELECT id, display_name, content_type, size_bytes, access_tier, uploaded_at FROM dbo.files WHERE owner_id = @owner ORDER BY uploaded_at DESC",
+    "SELECT id, display_name, content_type, size_bytes, access_tier, uploaded_at, deleted_at FROM dbo.files WHERE owner_id = @owner AND deleted_at IS NULL ORDER BY uploaded_at DESC",
     { owner: [sql.UniqueIdentifier, ownerId] }
   );
   return r.recordset.map(toFile);
 }
 
+// Fetch one active file (used for download / preview / rename / tier / share).
 async function getFile(ownerId, fileId) {
   const r = await query(
-    "SELECT id, display_name, content_type, size_bytes, access_tier, uploaded_at FROM dbo.files WHERE owner_id = @owner AND id = @id",
+    "SELECT id, display_name, content_type, size_bytes, access_tier, uploaded_at, deleted_at FROM dbo.files WHERE owner_id = @owner AND id = @id AND deleted_at IS NULL",
+    { owner: [sql.UniqueIdentifier, ownerId], id: [sql.UniqueIdentifier, fileId] }
+  );
+  return r.recordset[0] ? toFile(r.recordset[0]) : null;
+}
+
+// Files currently in the recycle bin, most recently deleted first.
+async function listDeletedFiles(ownerId) {
+  const r = await query(
+    "SELECT id, display_name, content_type, size_bytes, access_tier, uploaded_at, deleted_at FROM dbo.files WHERE owner_id = @owner AND deleted_at IS NOT NULL ORDER BY deleted_at DESC",
+    { owner: [sql.UniqueIdentifier, ownerId] }
+  );
+  return r.recordset.map(toFile);
+}
+
+// Fetch one file that is in the bin (used for restore / permanent delete).
+async function getDeletedFile(ownerId, fileId) {
+  const r = await query(
+    "SELECT id, display_name, content_type, size_bytes, access_tier, uploaded_at, deleted_at FROM dbo.files WHERE owner_id = @owner AND id = @id AND deleted_at IS NOT NULL",
     { owner: [sql.UniqueIdentifier, ownerId], id: [sql.UniqueIdentifier, fileId] }
   );
   return r.recordset[0] ? toFile(r.recordset[0]) : null;
@@ -93,7 +114,7 @@ async function fileNameExists(ownerId, name) {
 // Files used + bytes used, as a single SQL aggregate (drives the quota + meters).
 async function userUsage(ownerId) {
   const r = await query(
-    "SELECT COUNT(*) AS count, COALESCE(SUM(size_bytes), 0) AS bytes FROM dbo.files WHERE owner_id = @owner",
+    "SELECT COUNT(*) AS count, COALESCE(SUM(size_bytes), 0) AS bytes FROM dbo.files WHERE owner_id = @owner AND deleted_at IS NULL",
     { owner: [sql.UniqueIdentifier, ownerId] }
   );
   const row = r.recordset[0] || {};
@@ -125,7 +146,7 @@ async function deleteFileRecord(ownerId, fileId) {
 
 // Rename = one UPDATE. The bytes stay put (blob is named by the immutable id).
 async function renameFile(ownerId, fileId, newName) {
-  await query("UPDATE dbo.files SET display_name = @name WHERE owner_id = @owner AND id = @id", {
+  await query("UPDATE dbo.files SET display_name = @name WHERE owner_id = @owner AND id = @id AND deleted_at IS NULL", {
     owner: [sql.UniqueIdentifier, ownerId],
     id: [sql.UniqueIdentifier, fileId],
     name: [sql.NVarChar(255), newName],
@@ -135,10 +156,27 @@ async function renameFile(ownerId, fileId, newName) {
 // Set a file's Azure Blob access tier (Hot / Cool / Archive). Just a metadata
 // UPDATE here; the route also asks Blob Storage to move the bytes to that tier.
 async function setFileTier(ownerId, fileId, tier) {
-  await query("UPDATE dbo.files SET access_tier = @tier WHERE owner_id = @owner AND id = @id", {
+  await query("UPDATE dbo.files SET access_tier = @tier WHERE owner_id = @owner AND id = @id AND deleted_at IS NULL", {
     owner: [sql.UniqueIdentifier, ownerId],
     id: [sql.UniqueIdentifier, fileId],
     tier: [sql.NVarChar(20), tier],
+  });
+}
+
+// Soft delete: move a file to the recycle bin (bytes stay in Blob Storage).
+async function softDeleteFile(ownerId, fileId) {
+  await query("UPDATE dbo.files SET deleted_at = SYSUTCDATETIME() WHERE owner_id = @owner AND id = @id AND deleted_at IS NULL", {
+    owner: [sql.UniqueIdentifier, ownerId],
+    id: [sql.UniqueIdentifier, fileId],
+  });
+}
+
+// Restore a file from the recycle bin. The name was reserved the whole time
+// (the unique index covers deleted rows), so this never collides.
+async function restoreFile(ownerId, fileId) {
+  await query("UPDATE dbo.files SET deleted_at = NULL WHERE owner_id = @owner AND id = @id AND deleted_at IS NOT NULL", {
+    owner: [sql.UniqueIdentifier, ownerId],
+    id: [sql.UniqueIdentifier, fileId],
   });
 }
 
@@ -178,7 +216,7 @@ async function listActivity(viewerId, limit) {
     `SELECT TOP (@limit) a.action, a.target, a.area, a.created_at, u.name AS actor_name
        FROM dbo.activity a JOIN dbo.users u ON u.id = a.actor_id
        WHERE a.area = 'shared' OR a.actor_id = @viewer
-       ORDER BY a.created_at DESC`,
+       ORDER BY a.created_at DESC, a.id DESC`,
     { viewer: [sql.UniqueIdentifier, viewerId], limit: [sql.Int, Number(limit) || 10] }
   );
   return r.recordset.map((row) => ({
@@ -188,6 +226,19 @@ async function listActivity(viewerId, limit) {
     actorName: row.actor_name,
     createdAt: row.created_at,
   }));
+}
+
+// Per-day activity counts a viewer may see, since @since (a Date). Returns
+// [{ day: 'YYYY-MM-DD', count }]; the caller fills in any empty days.
+async function activityCountsByDay(viewerId, since) {
+  const r = await query(
+    `SELECT CONVERT(char(10), a.created_at, 23) AS day, COUNT(*) AS count
+       FROM dbo.activity a
+       WHERE (a.area = 'shared' OR a.actor_id = @viewer) AND a.created_at >= @since
+       GROUP BY CONVERT(char(10), a.created_at, 23)`,
+    { viewer: [sql.UniqueIdentifier, viewerId], since: [sql.DateTime2, since] }
+  );
+  return r.recordset.map((row) => ({ day: row.day, count: Number(row.count) || 0 }));
 }
 
 const sqlStore = {
@@ -202,10 +253,15 @@ const sqlStore = {
   deleteFileRecord,
   renameFile,
   setFileTier,
+  listDeletedFiles,
+  getDeletedFile,
+  softDeleteFile,
+  restoreFile,
   updateUserName,
   deleteUser,
   logActivity,
   listActivity,
+  activityCountsByDay,
 };
 
 // In demo mode, swap the whole store for the in-memory one (same interface).

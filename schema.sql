@@ -42,6 +42,13 @@ CREATE UNIQUE INDEX UX_files_owner_name ON dbo.files(owner_id, display_name);
 IF COL_LENGTH(N'dbo.files', N'access_tier') IS NULL
 ALTER TABLE dbo.files ADD access_tier NVARCHAR(20) NOT NULL CONSTRAINT DF_files_tier DEFAULT 'Hot';
 
+-- Soft delete (recycle bin): when set, the file is in the bin, hidden from the
+-- normal listing but restorable. NULL = active. The unique index above still
+-- covers deleted rows, so a name stays reserved until the file is restored or
+-- permanently purged (mirrors how Azure Blob soft delete retains the blob).
+IF COL_LENGTH(N'dbo.files', N'deleted_at') IS NULL
+ALTER TABLE dbo.files ADD deleted_at DATETIME2(3) NULL;
+
 -- Append-only activity log: who did what, when. A simple event table (the kind of
 -- thing NoSQL is also good at), read back with a JOIN to users for the actor name.
 IF OBJECT_ID(N'dbo.activity', N'U') IS NULL
@@ -51,7 +58,7 @@ CREATE TABLE dbo.activity (
     action      NVARCHAR(40)     NOT NULL,
     target      NVARCHAR(255)    NULL,
     area        NVARCHAR(20)     NOT NULL,
-    created_at  DATETIME2(0)     NOT NULL CONSTRAINT DF_activity_created DEFAULT SYSUTCDATETIME(),
+    created_at  DATETIME2(3)     NOT NULL CONSTRAINT DF_activity_created DEFAULT SYSUTCDATETIME(),
     CONSTRAINT FK_activity_actor FOREIGN KEY (actor_id) REFERENCES dbo.users(id) ON DELETE CASCADE
 );
 

@@ -47,6 +47,9 @@ const ICONS = {
   moon: '<path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"/>',
   user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
   layers: '<path d="m12 2 9 5-9 5-9-5 9-5z"/><path d="m3 12 9 5 9-5"/><path d="m3 17 9 5 9-5"/>',
+  archive: '<rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8"/><path d="M10 12h4"/>',
+  copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
+  restore: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',
 };
 function icon(name) {
   // Icons are decorative; adjacent text provides the accessible name.
@@ -167,7 +170,7 @@ function appShell({ title, active, user, flash, body }) {
       </div>
     </div>
   </div>
-  <script>${UPLOAD_WIDGET_SCRIPT}${LIGHTBOX_SCRIPT}${COPY_SCRIPT}${CONFIRM_DELETE_SCRIPT}${FORM_VALIDATION_SCRIPT}${SEARCH_SORT_SCRIPT}${TIER_SCRIPT}${THEME_TOGGLE_SCRIPT}</script>`;
+  <script>${UPLOAD_WIDGET_SCRIPT}${LIGHTBOX_SCRIPT}${COPY_SCRIPT}${CONFIRM_DELETE_SCRIPT}${FORM_VALIDATION_SCRIPT}${SEARCH_SORT_SCRIPT}${AUTOSUBMIT_SCRIPT}${THEME_TOGGLE_SCRIPT}</script>`;
 
   return htmlDoc(title, shell);
 }
@@ -251,7 +254,9 @@ const CONFIRM_DELETE_SCRIPT = `
   function open(form){
     pending = form;
     var nm = form.getAttribute("data-confirm-label") || "this item";
-    text.textContent = "Delete \\"" + nm + "\\"? This can\\u2019t be undone.";
+    var msg = form.getAttribute("data-confirm-message");
+    text.textContent = msg ? msg : ("Delete \\"" + nm + "\\"? This can\\u2019t be undone.");
+    if(okBtn) okBtn.textContent = form.getAttribute("data-confirm-ok-label") || "Delete";
     modal.hidden = false; lastFocus = document.activeElement; if(cancelBtn) cancelBtn.focus();
   }
   function close(){ modal.hidden = true; pending = null; if(lastFocus && lastFocus.focus) lastFocus.focus(); }
@@ -364,13 +369,14 @@ const THEME_TOGGLE_SCRIPT = `
 })();
 `;
 
-// Auto-submit the little access-tier selector when it changes (no Set button
-// needed). Kept apostrophe-free so it survives template-literal embedding.
-const TIER_SCRIPT = `
+// Auto-submit any select marked data-autosubmit when it changes (the access-tier
+// selector and the copy-to-Shared destination). Apostrophe-free so it survives
+// template-literal embedding.
+const AUTOSUBMIT_SCRIPT = `
 (function(){
   document.addEventListener("change", function(e){
     var sel = e.target;
-    if(sel && sel.matches && sel.matches("[data-tier-select]")){
+    if(sel && sel.matches && sel.matches("[data-autosubmit]")){
       var form = sel.closest("form");
       if(form) form.submit();
     }
@@ -419,15 +425,52 @@ function activityFeed(items) {
   return `<ul class="activity-list">${rows}</ul>`;
 }
 
+// A small CSS bar chart of activity counts per day (last 7 days). No SVG; bars
+// are divs sized by percentage of the busiest day, themed via CSS variables.
+function activityChart(bars) {
+  if (!bars || !bars.length) return `<p class="empty-inline" style="margin:0;">No recent activity.</p>`;
+  const max = Math.max(1, ...bars.map((b) => Number(b.count) || 0));
+  const cols = bars
+    .map((b) => {
+      const n = Number(b.count) || 0;
+      const h = n ? Math.max(4, Math.round((n / max) * 100)) : 0;
+      return `<div class="chart-col">
+        <span class="chart-val">${n}</span>
+        <div class="chart-track"><div class="chart-bar" style="height:${h}%"></div></div>
+        <span class="chart-label">${esc(b.label)}</span>
+      </div>`;
+    })
+    .join("");
+  return `<div class="bar-chart" role="img" aria-label="Activity counts for the last 7 days">${cols}</div>`;
+}
+
 // The per-file Azure Blob access-tier selector (My Files only; Azure Files has
-// no tiers). Auto-submits via TIER_SCRIPT.
+// no tiers). Auto-submits via AUTOSUBMIT_SCRIPT.
 function tierControl(file) {
   const tiers = ["Hot", "Cool", "Archive"];
   const cur = String(file.tier || "Hot");
   const opts = tiers.map((t) => `<option value="${t}"${t === cur ? " selected" : ""}>${t}</option>`).join("");
   return `<form class="tier-form" method="post" action="${file.tierUrl}">
-    <select class="tier-select tier-${esc(cur.toLowerCase())}" name="tier" data-tier-select title="Azure Blob access tier" aria-label="Access tier for ${esc(file.name)}">${opts}</select>
+    <select class="tier-select tier-${esc(cur.toLowerCase())}" name="tier" data-autosubmit title="Azure Blob access tier" aria-label="Access tier for ${esc(file.name)}">${opts}</select>
     <noscript><button class="btn secondary" type="submit">Set tier</button></noscript>
+  </form>`;
+}
+
+// "Copy to Shared" destination picker for a My Files tile: root or an existing
+// top-level shared folder. Auto-submits on choice (copy is non-destructive).
+function copyControl(file, sharedFolders) {
+  if (file.tier === "Archive") return ""; // archived bytes are offline
+  const folderOpts = (sharedFolders || [])
+    .map((name) => `<option value="${esc(name)}">Shared / ${esc(name)}</option>`)
+    .join("");
+  return `<form class="copy-form" method="post" action="/files/copy-to-shared">
+    <input type="hidden" name="id" value="${esc(file.id)}">
+    <select class="copy-select" name="path" data-autosubmit aria-label="Copy ${esc(file.name)} to Shared">
+      <option value="__none__" disabled selected>Copy to Shared…</option>
+      <option value="">Shared (root)</option>
+      ${folderOpts}
+    </select>
+    <noscript><button class="btn secondary" type="submit">Copy</button></noscript>
   </form>`;
 }
 
@@ -691,7 +734,7 @@ function quickLink(href, iconName, title, desc) {
   </a>`;
 }
 
-function renderDashboard({ user, myFiles, shared, members, storage, breakdown: bd, activity, flash }) {
+function renderDashboard({ user, myFiles, shared, members, storage, breakdown: bd, activity, week, flash }) {
   const storageBlock = storage
     ? `<h2 class="section-title">Your storage</h2>${storageCard(storage, bd || {})}`
     : "";
@@ -703,6 +746,8 @@ function renderDashboard({ user, myFiles, shared, members, storage, breakdown: b
       ${statCard("Members", members, "members")}
     </div>
     ${storageBlock}
+    <h2 class="section-title">This week</h2>
+    <div class="card chart-card">${activityChart(week)}</div>
     <h2 class="section-title">Recent activity</h2>
     <div class="card activity-card">${activityFeed(activity)}</div>
     <h2 class="section-title">Quick actions</h2>
@@ -744,21 +789,48 @@ function iconBtn(href, iconName, label) {
   return `<a class="action" href="${href}" title="${esc(label)}" aria-label="${esc(label)}">${icon(iconName)}</a>`;
 }
 
-function deleteForm(action, label, fields) {
+function deleteForm(action, label, fields, opts) {
   // Intercepted by CONFIRM_DELETE_SCRIPT, which reads the human label from
-  // data-confirm-label. `fields` supplies the hidden inputs (id, or name+path).
-  return `<form method="post" action="${action}" class="action-form" data-confirm-label="${esc(label)}">
+  // data-confirm-label (plus an optional custom message + OK-button label).
+  // `fields` supplies the hidden inputs (id, or name+path).
+  opts = opts || {};
+  const title = opts.title || "Delete";
+  const attrs = [
+    `data-confirm-label="${esc(label)}"`,
+    opts.message ? `data-confirm-message="${esc(opts.message)}"` : "",
+    opts.okLabel ? `data-confirm-ok-label="${esc(opts.okLabel)}"` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return `<form method="post" action="${action}" class="action-form" ${attrs}>
     ${fields || ""}
-    <button class="action danger" type="submit" title="Delete" aria-label="Delete ${esc(label)}">${icon("trash")}</button>
+    <button class="action danger" type="submit" title="${esc(title)}" aria-label="${esc(title)}: ${esc(label)}">${icon(opts.icon || "trash")}</button>
   </form>`;
 }
 
-function fileTile(file) {
+function fileTile(file, sharedFolders) {
+  const archived = file.tier === "Archive";
   const cat = file.isImage ? "image" : categoryOf(file.ext);
-  const thumb = file.isImage
+  // Archived blobs are offline (would need rehydration), so don't request the
+  // bytes for an inline preview; show a placeholder instead.
+  const thumb = archived
+    ? `<div class="thumb archived-thumb">${icon("archive")}<span>Archived</span></div>`
+    : file.isImage
     ? `<div class="thumb"><img src="${file.url}" alt="${esc(file.name)}" data-full="${file.url}" loading="lazy"></div>`
     : `<div class="thumb cat-${cat}"><span class="filetype">${esc(file.ext || "file")}</span></div>`;
   const meta = fileMeta(file);
+  // Archived blobs are offline, so download/share are hidden (they would fail);
+  // rename (metadata only) and the tier selector stay so you can un-archive.
+  const actions = [
+    archived ? "" : iconBtn(file.url, "download", "Download"),
+    archived ? "" : iconBtn(file.shareUrl, "link", "Get a shareable link"),
+    iconBtn(file.renameUrl, "edit", "Rename"),
+    deleteForm("/files/delete", file.name, `<input type="hidden" name="id" value="${esc(file.id)}">`, {
+      message: `Move “${file.name}” to the recycle bin? You can restore it later.`,
+      okLabel: "Move to bin",
+      title: "Move to recycle bin",
+    }),
+  ].join("");
   return `<div class="tile" data-name="${esc(file.name)}" data-size="${Number(file.size) || 0}" data-date="${dateMs(file.lastModified)}">
     ${thumb}
     <div class="meta">
@@ -768,26 +840,25 @@ function fileTile(file) {
       </div>
       <div class="tile-foot">
         ${tierControl(file)}
-        <div class="tile-actions">
-          ${iconBtn(file.url, "download", "Download")}
-          ${iconBtn(file.shareUrl, "link", "Get a shareable link")}
-          ${iconBtn(file.renameUrl, "edit", "Rename")}
-          ${deleteForm("/files/delete", file.name, `<input type="hidden" name="id" value="${esc(file.id)}">`)}
-        </div>
+        <div class="tile-actions">${actions}</div>
       </div>
+      ${copyControl(file, sharedFolders)}
     </div>
   </div>`;
 }
 
-function renderFiles({ user, files, flash }) {
+function renderFiles({ user, files, sharedFolders, deletedCount, flash }) {
   const gallery = files.length
     ? `<div data-browse>
         ${toolbar()}
-        <div class="gallery" data-items>${files.map(fileTile).join("")}</div>
+        <div class="gallery" data-items>${files.map((f) => fileTile(f, sharedFolders)).join("")}</div>
         <div class="empty-inline" data-no-matches hidden>No files match your search.</div>
       </div>`
     : emptyState("No files yet. Upload your first file above.");
   const u = usage(files, MAX_FILES_PER_USER, MAX_BYTES_PER_USER);
+  const trashLink = deletedCount > 0
+    ? `<div class="trash-link-row"><a class="trash-link" href="/files/trash">${icon("trash")} Recycle bin (${deletedCount})</a></div>`
+    : "";
   const example = files[0];
   const calls = [
     { op: "List your files", call:
@@ -801,7 +872,9 @@ ORDER BY uploaded_at DESC` },
 `SELECT ... FROM files WHERE owner_id = @owner AND id = @id${example ? `   -- @id = '${example.id}'` : ""}
 + blobClient.download()` },
     { op: "Rename", call: "UPDATE files SET display_name = @new   (the bytes never move)" },
-    { op: "Delete", call: "DELETE FROM files WHERE id = @id   +   blockBlobClient.deleteIfExists()" },
+    { op: "Delete (to recycle bin)", call: "UPDATE files SET deleted_at = SYSUTCDATETIME()   (bytes kept)" },
+    { op: "Restore / purge", call: "UPDATE files SET deleted_at = NULL   /   DELETE + blockBlobClient.deleteIfExists()" },
+    { op: "Copy to Shared", call: "blobClient.downloadToBuffer()   +   shareFileClient.uploadData(bytes)" },
     { op: "Shareable link", call: 'blobClient.generateSasUrl({ permissions: "r", expiresOn })' },
   ];
 
@@ -811,9 +884,60 @@ ORDER BY uploaded_at DESC` },
       ${uploadForm("/files/upload", "Upload a file")}
       ${usageMeter(u)}
     </div>
+    ${trashLink}
     ${gallery}
     ${explainer(calls)}`;
   return appShell({ title: "My Files", active: "files", user, flash, body });
+}
+
+// ---------- Recycle bin (soft-deleted My Files) ----------
+
+// A bin tile never previews inline: a deleted file's /files/blob/:id 404s (that
+// route serves active files only), so use the type placeholder for everything.
+function trashTile(file) {
+  const cat = file.isImage ? "image" : categoryOf(file.ext);
+  const meta = [
+    file.size != null ? esc(humanSize(file.size)) : "",
+    file.deletedAt ? `deleted ${esc(relativeTime(file.deletedAt))}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return `<div class="tile">
+    <div class="thumb cat-${cat}"><span class="filetype">${esc(file.ext || "file")}</span></div>
+    <div class="meta">
+      <div class="meta-info">
+        <span class="name">${esc(file.name)}</span>
+        ${meta ? `<span class="size muted">${meta}</span>` : ""}
+      </div>
+      <div class="tile-actions">
+        <form method="post" action="/files/restore" style="display:contents;">
+          <input type="hidden" name="id" value="${esc(file.id)}">
+          <button class="action" type="submit" title="Restore" aria-label="Restore ${esc(file.name)}">${icon("restore")}</button>
+        </form>
+        ${deleteForm("/files/purge", file.name, `<input type="hidden" name="id" value="${esc(file.id)}">`, {
+          message: `Permanently delete “${file.name}”? This can't be undone.`,
+          okLabel: "Delete forever",
+          title: "Delete permanently",
+        })}
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderTrash({ user, files, flash }) {
+  const list = files.length
+    ? `<div class="gallery">${files.map(trashTile).join("")}</div>`
+    : emptyState("Your recycle bin is empty.");
+  const body = `
+    ${pageHeader("Recycle bin", "Files you deleted from My Files. Restore them, or delete them permanently. Like Azure Blob soft delete, the bytes are kept until you purge.", "Azure Blob Storage · soft delete")}
+    <nav class="crumbs" style="margin-top:-10px;"><a href="/files">${icon("files")} Back to My Files</a></nav>
+    ${list}
+    ${explainer([
+      { op: "List the bin", call: "SELECT ... FROM files WHERE owner_id = @you AND deleted_at IS NOT NULL" },
+      { op: "Restore", call: "UPDATE files SET deleted_at = NULL WHERE id = @id" },
+      { op: "Delete permanently", call: "DELETE FROM files WHERE id = @id   +   blockBlobClient.deleteIfExists()" },
+    ])}`;
+  return appShell({ title: "Recycle bin", active: "files", user, flash, body });
 }
 
 // ---------- Shared Files (Azure Files) ----------
@@ -858,6 +982,10 @@ function renderShared({ user, path, folders, files, flash }) {
           ${iconBtn(f.url, "download", "Download")}
           ${iconBtn(f.shareUrl, "link", "Get a shareable link")}
           ${iconBtn(f.renameUrl, "edit", "Rename")}
+          <form method="post" action="/shared/copy-to-mine" style="display:contents;">
+            <input type="hidden" name="name" value="${esc(f.name)}">${pathField}
+            <button class="action" type="submit" title="Copy to My Files" aria-label="Copy ${esc(f.name)} to My Files">${icon("copy")}</button>
+          </form>
           ${deleteForm("/shared/delete", f.name, `<input type="hidden" name="name" value="${esc(f.name)}">${pathField}`)}
         </div></td>
       </tr>`
@@ -1069,6 +1197,7 @@ module.exports = {
   renderShared,
   renderMembers,
   renderAccount,
+  renderTrash,
   renderShareLink,
   renderRename,
   renderNotConfigured,

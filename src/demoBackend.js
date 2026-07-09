@@ -25,6 +25,7 @@ function toFile(f) {
     id, name: f.display_name, contentType: f.content_type || "",
     isImage: /^image\//.test(f.content_type || ""), ext: fileExt(f.display_name),
     size: f.size_bytes, tier: f.access_tier || "Hot", lastModified: f.uploaded_at,
+    deletedAt: f.deleted_at || null,
     url: `/files/blob/${id}`, shareUrl: `/files/share/${id}`, renameUrl: `/files/rename/${id}`,
     tierUrl: `/files/tier/${id}`,
   };
@@ -37,18 +38,22 @@ const store = {
     const u = { id: randomUUID(), name: String(name).trim(), email: String(email).trim().toLowerCase(), createdAt: new Date() };
     users.push(u); return toUser(u);
   },
-  async listUserFiles(ownerId) { return files.filter((f) => f.owner_id === ownerId).sort((a, b) => b.uploaded_at - a.uploaded_at).map(toFile); },
-  async getFile(ownerId, fileId) { const f = files.find((x) => x.owner_id === ownerId && x.id === fileId); return f ? toFile(f) : null; },
+  async listUserFiles(ownerId) { return files.filter((f) => f.owner_id === ownerId && !f.deleted_at).sort((a, b) => b.uploaded_at - a.uploaded_at).map(toFile); },
+  async getFile(ownerId, fileId) { const f = files.find((x) => x.owner_id === ownerId && x.id === fileId && !x.deleted_at); return f ? toFile(f) : null; },
   async fileNameExists(ownerId, name) { return files.some((f) => f.owner_id === ownerId && f.display_name === name); },
-  async userUsage(ownerId) { const mine = files.filter((f) => f.owner_id === ownerId); return { count: mine.length, bytes: mine.reduce((s, f) => s + (Number(f.size_bytes) || 0), 0) }; },
+  async userUsage(ownerId) { const mine = files.filter((f) => f.owner_id === ownerId && !f.deleted_at); return { count: mine.length, bytes: mine.reduce((s, f) => s + (Number(f.size_bytes) || 0), 0) }; },
   async createFileRecord({ ownerId, displayName, contentType, sizeBytes }) {
     const id = randomUUID();
-    files.push({ id, owner_id: ownerId, display_name: displayName, content_type: contentType || null, size_bytes: Number(sizeBytes) || 0, access_tier: "Hot", uploaded_at: new Date() });
+    files.push({ id, owner_id: ownerId, display_name: displayName, content_type: contentType || null, size_bytes: Number(sizeBytes) || 0, access_tier: "Hot", uploaded_at: new Date(), deleted_at: null });
     return id;
   },
   async deleteFileRecord(ownerId, fileId) { const i = files.findIndex((f) => f.owner_id === ownerId && f.id === fileId); if (i >= 0) files.splice(i, 1); },
-  async renameFile(ownerId, fileId, newName) { const f = files.find((x) => x.owner_id === ownerId && x.id === fileId); if (f) f.display_name = newName; },
-  async setFileTier(ownerId, fileId, tier) { const f = files.find((x) => x.owner_id === ownerId && x.id === fileId); if (f) f.access_tier = tier; },
+  async renameFile(ownerId, fileId, newName) { const f = files.find((x) => x.owner_id === ownerId && x.id === fileId && !x.deleted_at); if (f) f.display_name = newName; },
+  async setFileTier(ownerId, fileId, tier) { const f = files.find((x) => x.owner_id === ownerId && x.id === fileId && !x.deleted_at); if (f) f.access_tier = tier; },
+  async listDeletedFiles(ownerId) { return files.filter((f) => f.owner_id === ownerId && f.deleted_at).sort((a, b) => b.deleted_at - a.deleted_at).map(toFile); },
+  async getDeletedFile(ownerId, fileId) { const f = files.find((x) => x.owner_id === ownerId && x.id === fileId && x.deleted_at); return f ? toFile(f) : null; },
+  async softDeleteFile(ownerId, fileId) { const f = files.find((x) => x.owner_id === ownerId && x.id === fileId && !x.deleted_at); if (f) f.deleted_at = new Date(); },
+  async restoreFile(ownerId, fileId) { const f = files.find((x) => x.owner_id === ownerId && x.id === fileId && x.deleted_at); if (f) f.deleted_at = null; },
   async updateUserName(userId, name) { const u = users.find((x) => x.id === userId); if (u) u.name = String(name).trim(); },
   async deleteUser(userId) {
     // Cascade: remove the user, their file rows + blobs, and their activity.
@@ -69,6 +74,17 @@ const store = {
         const u = users.find((x) => x.id === a.actor_id);
         return { action: a.action, target: a.target, area: a.area, actorName: u ? u.name : "Someone", createdAt: a.created_at };
       });
+  },
+  async activityCountsByDay(viewerId, since) {
+    const s = since instanceof Date ? since : new Date(since);
+    const byDay = new Map();
+    for (const a of activity) {
+      if (!(a.area === "shared" || a.actor_id === viewerId)) continue;
+      if (a.created_at < s) continue;
+      const day = a.created_at.toISOString().slice(0, 10);
+      byDay.set(day, (byDay.get(day) || 0) + 1);
+    }
+    return [...byDay.entries()].map(([day, count]) => ({ day, count }));
   },
 };
 
@@ -100,6 +116,7 @@ function blobContainerClient(containerId) {
       return {
         async exists() { return c.has(name); },
         async download() { const b = c.get(name); return { contentType: b ? b.contentType : undefined, readableStreamBody: b ? Readable.from(b.buffer) : null }; },
+        async downloadToBuffer() { const b = c.get(name); return b ? Buffer.from(b.buffer) : Buffer.alloc(0); },
         async generateSasUrl({ expiresOn }) { return demoSas("blob", containerId, name, expiresOn); },
       };
     },
@@ -233,17 +250,20 @@ function seed() {
   users.push(ada, alan, grace);
 
   // Ada's private files (metadata + blob bytes under her container).
-  function addFile(name, type, buffer, tier) {
+  function addFile(name, type, buffer, tier, deletedAt) {
     const id = randomUUID();
     const t = tier || "Hot";
-    files.push({ id, owner_id: ada.id, display_name: name, content_type: type, size_bytes: buffer.length, access_tier: t, uploaded_at: new Date(Date.now() - Math.floor(Math.random() * 5) * 36e5) });
+    files.push({ id, owner_id: ada.id, display_name: name, content_type: type, size_bytes: buffer.length, access_tier: t, uploaded_at: new Date(Date.now() - Math.floor(Math.random() * 5) * 36e5), deleted_at: deletedAt || null });
     if (!blobs.has(ada.id)) blobs.set(ada.id, new Map());
     blobs.get(ada.id).set(id, { buffer, contentType: type, tier: t });
+    return id;
   }
   addFile("welcome.png", "image/png", IMG_WELCOME);
   addFile("project-brief.pdf", "application/pdf", Buffer.from("%PDF-1.4 demo project brief"));
   addFile("q3-budget.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", Buffer.from("demo spreadsheet bytes"), "Cool");
   addFile("intro-clip.mp4", "video/mp4", Buffer.from("demo video bytes ".repeat(64)), "Archive");
+  // One file already in the recycle bin, so the bin has something to show.
+  addFile("old-notes.txt", "text/plain", Buffer.from("superseded draft notes"), "Hot", new Date(Date.now() - 2 * 36e5));
 
   // Shared area: a couple of root files + a folder with a file.
   const root = dirEntry("");
@@ -256,12 +276,20 @@ function seed() {
   // A little activity history so the dashboard feed has something to show.
   // (shared actions are visible to everyone; private/account ones only to the actor.)
   const mins = (n) => new Date(Date.now() - n * 60000);
+  const days = (n) => new Date(Date.now() - n * 1440 * 60000);
   activity.push(
     { actor_id: ada.id, action: "uploaded", target: "welcome.png", area: "files", created_at: mins(12) },
     { actor_id: grace.id, action: "uploaded", target: "brand-logo.png", area: "shared", created_at: mins(48) },
     { actor_id: alan.id, action: "created folder", target: "designs", area: "shared", created_at: mins(180) },
     { actor_id: ada.id, action: "set Cool tier on", target: "q3-budget.xlsx", area: "files", created_at: mins(320) },
-    { actor_id: grace.id, action: "uploaded", target: "team-handbook.pdf", area: "shared", created_at: mins(1440) }
+    { actor_id: ada.id, action: "moved to the recycle bin", target: "old-notes.txt", area: "files", created_at: mins(120) },
+    { actor_id: grace.id, action: "uploaded", target: "team-handbook.pdf", area: "shared", created_at: days(1) },
+    // A little history across the past week so the activity chart has a shape.
+    { actor_id: ada.id, action: "uploaded", target: "intro-clip.mp4", area: "files", created_at: days(2) },
+    { actor_id: alan.id, action: "uploaded", target: "spec.pdf", area: "shared", created_at: days(2) },
+    { actor_id: grace.id, action: "renamed a file to", target: "logo-final.png", area: "shared", created_at: days(3) },
+    { actor_id: ada.id, action: "uploaded", target: "project-brief.pdf", area: "files", created_at: days(4) },
+    { actor_id: alan.id, action: "deleted", target: "scratch.txt", area: "shared", created_at: days(5) }
   );
 }
 

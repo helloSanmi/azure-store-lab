@@ -12,7 +12,7 @@ const { FileSASPermissions } = require("@azure/storage-file-share");
 const { blobServiceClient, shareServiceClient, SHARED_FILE_SHARE } = require("../src/azureClients");
 const store = require("../src/store");
 const { currentUser, requireAuth, requireStorage, requireDb, setFlash, takeFlash } = require("../src/auth");
-const { renderDashboard, renderFiles, renderShared, renderMembers, renderShareLink, renderRename, renderAccount } = require("../src/views");
+const { renderDashboard, renderFiles, renderShared, renderMembers, renderShareLink, renderRename, renderAccount, renderTrash } = require("../src/views");
 const {
   MAX_FILE_BYTES,
   MAX_FILE_LABEL,
@@ -178,7 +178,18 @@ router.get("/dashboard", async (req, res, next) => {
     try { members = (await store.listUsers()).length; } catch (e) { /* keep "n/a" */ }
     let activity = [];
     try { activity = await store.listActivity(user.id, 8); } catch (e) { /* keep [] */ }
-    res.send(renderDashboard({ user, myFiles, shared, members, storage, breakdown: bd, activity, flash: takeFlash(req) }));
+    // Last 7 days of activity, bucketed by day, for the dashboard chart.
+    let week = [];
+    try {
+      const since = new Date(Date.now() - 6 * 864e5);
+      const counts = new Map((await store.activityCountsByDay(user.id, since)).map((r) => [r.day, r.count]));
+      for (let i = 6; i >= 0; i--) {
+        const d = new Date(Date.now() - i * 864e5);
+        const key = d.toISOString().slice(0, 10);
+        week.push({ label: d.toLocaleDateString("en-GB", { weekday: "short" }), count: counts.get(key) || 0 });
+      }
+    } catch (e) { /* keep [] */ }
+    res.send(renderDashboard({ user, myFiles, shared, members, storage, breakdown: bd, activity, week, flash: takeFlash(req) }));
   } catch (err) {
     next(err);
   }
@@ -189,7 +200,12 @@ router.get("/files", async (req, res, next) => {
   try {
     const user = currentUser(req);
     const files = await store.listUserFiles(user.id);
-    res.send(renderFiles({ user, files, flash: takeFlash(req) }));
+    // Top-level shared folders offered as "copy to Shared" targets (best-effort).
+    let sharedFolders = [];
+    try { sharedFolders = (await listSharedDir("")).folders; } catch (e) { /* copy targets are optional */ }
+    let deletedCount = 0;
+    try { deletedCount = (await store.listDeletedFiles(user.id)).length; } catch (e) { /* bin count optional */ }
+    res.send(renderFiles({ user, files, sharedFolders, deletedCount, flash: takeFlash(req) }));
   } catch (err) {
     next(err);
   }
@@ -210,7 +226,7 @@ router.post("/files/upload", handleUpload("/files"), async (req, res, next) => {
       return res.redirect("/files");
     }
     if (await store.fileNameExists(user.id, name)) {
-      setFlash(req, "error", `A file named “${name}” already exists. Rename or delete it first.`);
+      setFlash(req, "error", `A file named “${name}” already exists (it may be in your recycle bin). Rename it, or restore/permanently delete the existing one first.`);
       return res.redirect("/files");
     }
     const { count, bytes } = await store.userUsage(user.id);
@@ -255,6 +271,11 @@ router.get("/files/blob/:id", async (req, res, next) => {
     if (!file) return res.status(404).send("Not found");
     const blob = userContainer(user.id).getBlobClient(file.id);
     if (!(await blob.exists())) return res.status(404).send("Not found");
+    // Archived blobs are offline in Azure: download() would fail with 409
+    // BlobArchived. Refuse cleanly (and identically in demo) instead of 500ing.
+    if (file.tier === "Archive") {
+      return res.status(409).send("This file is archived (offline storage). Set its tier back to Hot or Cool to download it.");
+    }
     const download = await blob.download();
     res.set("Content-Type", file.contentType || download.contentType || "application/octet-stream");
     res.set("X-Content-Type-Options", "nosniff");
@@ -270,7 +291,8 @@ router.get("/files/blob/:id", async (req, res, next) => {
   }
 });
 
-// Delete one of the signed-in user's files: remove the bytes, then the row.
+// "Delete" a file: soft delete (move to the recycle bin). The bytes stay in
+// Blob Storage so it can be restored; permanent removal happens on purge.
 router.post("/files/delete", async (req, res, next) => {
   try {
     const user = currentUser(req);
@@ -284,11 +306,69 @@ router.post("/files/delete", async (req, res, next) => {
       setFlash(req, "error", "That file no longer exists.");
       return res.redirect("/files");
     }
+    await store.softDeleteFile(user.id, id);
+    logActivity(user, "moved to the recycle bin", file.name, "files");
+    setFlash(req, "success", `Moved “${file.name}” to the recycle bin.`);
+    res.redirect("/files");
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------- Recycle bin (soft-deleted My Files) ----------
+router.get("/files/trash", async (req, res, next) => {
+  try {
+    const user = currentUser(req);
+    const files = await store.listDeletedFiles(user.id);
+    res.send(renderTrash({ user, files, flash: takeFlash(req) }));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Restore a file from the bin. Its name was reserved the whole time, so this
+// is a plain UPDATE that clears deleted_at; it never collides.
+router.post("/files/restore", async (req, res, next) => {
+  try {
+    const user = currentUser(req);
+    const id = req.body.id;
+    if (!isGuid(id)) {
+      setFlash(req, "error", "Invalid file id.");
+      return res.redirect("/files/trash");
+    }
+    const file = await store.getDeletedFile(user.id, id);
+    if (!file) {
+      setFlash(req, "error", "That file is not in the recycle bin.");
+      return res.redirect("/files/trash");
+    }
+    await store.restoreFile(user.id, id);
+    logActivity(user, "restored", file.name, "files");
+    setFlash(req, "success", `Restored “${file.name}”.`);
+    res.redirect("/files/trash");
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Permanently delete a file from the bin: remove the bytes, then the row.
+router.post("/files/purge", async (req, res, next) => {
+  try {
+    const user = currentUser(req);
+    const id = req.body.id;
+    if (!isGuid(id)) {
+      setFlash(req, "error", "Invalid file id.");
+      return res.redirect("/files/trash");
+    }
+    const file = await store.getDeletedFile(user.id, id);
+    if (!file) {
+      setFlash(req, "error", "That file is not in the recycle bin.");
+      return res.redirect("/files/trash");
+    }
     await userContainer(user.id).getBlockBlobClient(id).deleteIfExists();
     await store.deleteFileRecord(user.id, id);
-    logActivity(user, "deleted", file.name, "files");
-    setFlash(req, "success", `Deleted “${file.name}”.`);
-    res.redirect("/files");
+    logActivity(user, "permanently deleted", file.name, "files");
+    setFlash(req, "success", `Permanently deleted “${file.name}”.`);
+    res.redirect("/files/trash");
   } catch (err) {
     next(err);
   }
@@ -304,6 +384,11 @@ router.get("/files/share/:id", async (req, res, next) => {
     if (!file) return res.status(404).send("Not found");
     const blob = userContainer(user.id).getBlobClient(file.id);
     if (!(await blob.exists())) return res.status(404).send("Not found");
+    // A SAS for an archived blob would point at unreadable bytes, so block it.
+    if (file.tier === "Archive") {
+      setFlash(req, "error", "Archived files can't be shared. Set the tier back to Hot or Cool first.");
+      return res.redirect("/files");
+    }
     const expiresOn = new Date(Date.now() + SAS_TTL_MS);
     const url = await blob.generateSasUrl({ permissions: BlobSASPermissions.parse("r"), expiresOn });
     res.send(renderShareLink({ user, name: file.name, url, expiresOn, backHref: "/files" }));
@@ -401,6 +486,64 @@ router.post("/files/tier/:id", async (req, res, next) => {
   }
 });
 
+// Copy one of your private files into the Shared area. This moves bytes between
+// two different Azure services (Blob -> Files): read the blob, write the share.
+router.post("/files/copy-to-shared", async (req, res, next) => {
+  try {
+    const user = currentUser(req);
+    const id = req.body.id;
+    if (!isGuid(id)) {
+      setFlash(req, "error", "Invalid file id.");
+      return res.redirect("/files");
+    }
+    const dest = sanitizePath(req.body.path);
+    if (dest === null) {
+      setFlash(req, "error", "Invalid destination folder.");
+      return res.redirect("/files");
+    }
+    const file = await store.getFile(user.id, id);
+    if (!file) {
+      setFlash(req, "error", "That file no longer exists.");
+      return res.redirect("/files");
+    }
+    if (file.tier === "Archive") {
+      setFlash(req, "error", "Archived files can't be copied. Set the tier back to Hot or Cool first.");
+      return res.redirect("/files");
+    }
+    // Only the root or an existing top-level shared folder is a valid target.
+    const folders = (await listSharedDir("")).folders;
+    if (dest !== "" && !folders.includes(dest)) {
+      setFlash(req, "error", "That shared folder no longer exists.");
+      return res.redirect("/files");
+    }
+    const blob = userContainer(user.id).getBlobClient(id);
+    if (!(await blob.exists())) {
+      setFlash(req, "error", "That file's data is missing.");
+      return res.redirect("/files");
+    }
+    const destDir = sharedDir(dest);
+    const { files: sharedFiles } = await listSharedDir(dest);
+    const quotaError = checkQuota(sharedFiles, file.name, file.size, MAX_FILES_SHARED, MAX_BYTES_SHARED);
+    if (quotaError) {
+      setFlash(req, "error", quotaError);
+      return res.redirect("/files");
+    }
+    if (await destDir.getFileClient(file.name).exists()) {
+      setFlash(req, "error", `Shared${dest ? " / " + dest : ""} already has a file named “${file.name}”.`);
+      return res.redirect("/files");
+    }
+    const buffer = await blob.downloadToBuffer();
+    await destDir.getFileClient(file.name).uploadData(buffer, {
+      fileHttpHeaders: { fileContentType: file.contentType || "application/octet-stream" },
+    });
+    logActivity(user, "copied to Shared", file.name, "shared");
+    setFlash(req, "success", `Copied “${file.name}” to Shared${dest ? " / " + dest : ""}.`);
+    res.redirect("/files");
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ---------- Account (SQL: your user row) ----------
 router.get("/account", async (req, res, next) => {
   try {
@@ -441,10 +584,17 @@ router.post("/account/name", async (req, res, next) => {
 router.post("/account/delete", async (req, res, next) => {
   try {
     const user = currentUser(req);
+    // Authoritative step first: delete the account row. The ON DELETE CASCADE
+    // foreign keys remove the user's file metadata + activity. If this throws,
+    // nothing has been destroyed in storage yet and the error surfaces normally.
+    await store.deleteUser(user.id);
+    // Then best-effort: remove the private blob container (all their bytes).
+    // A failure here only leaves an orphaned, unreferenced (random-id) container.
     try {
       await userContainer(user.id).deleteIfExists();
-    } catch (e) { /* best-effort: the SQL cascade is the source of truth */ }
-    await store.deleteUser(user.id);
+    } catch (e) {
+      console.warn(`[account] could not remove blob container for ${user.id}:`, e.message);
+    }
     req.session.destroy(() => res.redirect("/login"));
   } catch (err) {
     next(err);
@@ -685,6 +835,55 @@ router.post("/shared/rename", async (req, res, next) => {
     await src.deleteIfExists();
     logActivity(currentUser(req), "renamed a file to", newName, "shared");
     setFlash(req, "success", `Renamed to “${newName}”.`);
+    res.redirect(back);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Copy a shared file into your private My Files. Bytes move Files -> Blob.
+router.post("/shared/copy-to-mine", async (req, res, next) => {
+  try {
+    const user = currentUser(req);
+    const p = sanitizePath(req.body.path);
+    const name = req.body.name;
+    if (p === null || !isValidLeaf(name)) {
+      setFlash(req, "error", "Invalid request.");
+      return res.redirect("/shared");
+    }
+    const back = sharedBack(p);
+    const src = sharedDir(p).getFileClient(name);
+    if (!(await src.exists())) {
+      setFlash(req, "error", "That file no longer exists.");
+      return res.redirect(back);
+    }
+    if (await store.fileNameExists(user.id, name)) {
+      setFlash(req, "error", `You already have a file named “${name}” (check your recycle bin too).`);
+      return res.redirect(back);
+    }
+    const props = await src.getProperties();
+    const size = Number(props.contentLength) || 0;
+    const { count, bytes } = await store.userUsage(user.id);
+    const quotaError = quotaFromCounts(count, bytes, size, MAX_FILES_PER_USER, MAX_BYTES_PER_USER);
+    if (quotaError) {
+      setFlash(req, "error", quotaError);
+      return res.redirect(back);
+    }
+    const contentType = props.contentType || "application/octet-stream";
+    const buffer = await src.downloadToBuffer();
+    const fileId = await store.createFileRecord({ ownerId: user.id, displayName: name, contentType, sizeBytes: size });
+    try {
+      const container = userContainer(user.id);
+      await container.createIfNotExists();
+      await container.getBlockBlobClient(fileId).uploadData(buffer, {
+        blobHTTPHeaders: { blobContentType: contentType, blobContentDisposition: contentDisposition(name) },
+      });
+    } catch (e) {
+      await store.deleteFileRecord(user.id, fileId).catch(() => {});
+      throw e;
+    }
+    logActivity(user, "copied from Shared to My Files", name, "files");
+    setFlash(req, "success", `Copied “${name}” to My Files.`);
     res.redirect(back);
   } catch (err) {
     next(err);
