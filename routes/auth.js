@@ -17,6 +17,7 @@ function startSession(req, user, flashText, callback) {
     req.session.save(callback);
   });
 }
+//commet to change or test
 
 // Land on the dashboard if signed in, otherwise the sign-in page.
 router.get("/", (req, res) => {
